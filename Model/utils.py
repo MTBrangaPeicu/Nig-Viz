@@ -1,0 +1,513 @@
+import torch
+import numpy as np
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
+from typing import Callable, Iterable, Dict, List
+import gc
+
+import logging
+
+logging.basicConfig(level=logging.INFO)
+
+import json
+
+
+def get_interesting_modules() -> Dict:
+    """
+    Returns a dictionnary containing the name of the interesting modules in the model.
+
+    :return Dict: Dictionnary where the key is the module's name and the value is the number of out features.
+    """
+    model = AutoModelForSequenceClassification.from_pretrained("castorini/monobert-large-msmarco")
+
+    interesting_layers = ["query", "value", "key", "dense",
+                          "activation"]  # As we start from the embeddings, we don't want to include them in our analysis
+    forbidden_layers = ["embeddings", "pooler", "LayerNorm"]
+    neurons_per_layers = dict()
+    for name, module in model.named_modules():
+        splitted_name = name.split(".")
+        if splitted_name[-1] in interesting_layers and not any(i in forbidden_layers for i in splitted_name):
+            neurons_per_layers[name] = module.out_features
+
+    return neurons_per_layers
+
+
+class NumpyArrayEncoder(json.JSONEncoder):
+    # Special class used to encode numpy array into json files
+    def default(self, obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        else:
+            return super(NumpyArrayEncoder, self).default(obj)
+
+
+def untuple(x):
+    return x[0] if isinstance(x, tuple) else x
+
+
+class InputsExtractor(torch.nn.Module):
+    # Hook used to extract inputs from a list of modules during a forward pass
+    def __init__(self, model: torch.nn.Module, token_type_ids: Iterable[torch.Tensor],
+                 attention_mask: Iterable[torch.Tensor], layer_names: Iterable[str]):
+        super().__init__()
+        self.model = model
+        self.token_type_ids = token_type_ids
+        self.attention_mask = attention_mask
+        self.inputs = dict()
+        self.inputs_store = dict()
+        self.hooks_handles = list()
+
+        for layer_name in layer_names:
+            layer = dict([*self.model.named_modules()])[layer_name]
+            self.hooks_handles.append(layer.register_forward_hook(self.save_inputs_hooks(layer_name)))
+
+    @property
+    def items(self):
+        return self.inputs
+
+    @property
+    def items_store(self):
+        return self.inputs_store
+
+    def save_inputs_hooks(self, name) -> Callable:
+        def hook(_, input, __):
+            self.inputs[name] = input[0]  # Store it and prepares it for backprop
+            self.inputs[name].retain_grad()
+
+            if name in self.inputs_store.keys():
+                self.inputs_store[name].append(input[0])
+            else:
+                self.inputs_store[name] = [input[0]]
+
+        return hook
+
+    def remove_hooks(self):
+        for handle in self.hooks_handles:
+            handle.remove()
+
+    def clear_items(self):
+        del self.inputs
+        gc.collect()
+        torch.cuda.empty_cache()
+        self.inputs = dict()
+
+    def forward(self, inputs_embeddings):
+        model_outputs = self.model(inputs_embeds=inputs_embeddings, token_type_ids=self.token_type_ids,
+                                   attention_mask=self.attention_mask)
+        return model_outputs
+
+
+class OutputsExtractor(torch.nn.Module):
+    # SAme as InputsExtractor but to extract outputs instead
+    def __init__(self, model: torch.nn.Module, token_type_ids: Iterable[torch.Tensor],
+                 attention_mask: Iterable[torch.Tensor], layer_names: Iterable[str]):
+        super().__init__()
+        self.model = model
+        self.token_type_ids = token_type_ids
+        self.attention_mask = attention_mask
+        self.outputs = dict()
+        self.outputs_store = dict()
+        self.hooks_handles = list()
+
+        for layer_name in layer_names:
+            layer = dict([*self.model.named_modules()])[layer_name]
+            self.hooks_handles.append(layer.register_forward_hook(self.save_outputs_hooks(layer_name)))
+
+    @property
+    def items(self):
+        return self.outputs
+
+    @property
+    def items_store(self):
+        return self.outputs_store
+
+    def save_outputs_hooks(self, name) -> Callable:
+        def hook(_, __, output):
+            self.outputs[name] = untuple(output)  # Store it and prepares it for backprop
+            self.outputs[name].retain_grad()
+
+            if name in self.outputs_store.keys():
+                self.outputs_store[name].append(untuple(output.clone().detach().cpu()))
+            else:
+                self.outputs_store[name] = [untuple(output.clone().detach().cpu())]
+
+        return hook
+
+    def remove_hooks(self):
+        for handle in self.hooks_handles:
+            handle.remove()
+
+    def clear_items(self):
+        del self.outputs
+        gc.collect()
+        torch.cuda.empty_cache()
+        self.outputs = dict()
+
+    def forward(self, inputs_embeddings):
+        model_outputs = self.model(inputs_embeds=inputs_embeddings, token_type_ids=self.token_type_ids,
+                                   attention_mask=self.attention_mask)
+        return model_outputs
+
+
+class PrunedModel(torch.nn.Module):
+    # Hook used to mask the output of some layer given a pruning scheme
+    def __init__(self, model: torch.nn.Module, positions_per_module: Dict, prune_input: bool):
+        super().__init__()
+        self.model = model
+        self.hooks_handles = list()
+
+        for layer_name, layer in positions_per_module.items():
+            layer = dict([*self.model.named_modules()])[layer_name]
+            if prune_input:
+                self.hooks_handles.append(layer.register_forward_pre_hook(
+                    self.prune_inputs_hook(self.model.device, positions_per_module[layer_name])))
+            else:
+                self.hooks_handles.append(layer.register_forward_hook(
+                    self.prune_outputs_hook(self.model.device, positions_per_module[layer_name])))
+
+    def prune_inputs_hook(self, device, positions: Iterable) -> Callable:
+        def pre_hook(model, args):
+            mask = torch.ones(args[0].numel())
+            for idx in positions:
+                mask[int(idx)] = 0
+            mask = mask.to(device)
+            flattened_input = args[0].flatten()
+            masked_input = mask * flattened_input
+            return tuple(masked_input.view(args[0].shape).unsqueeze(dim=0))
+
+        return pre_hook
+
+    def prune_outputs_hook(self, device, positions: Iterable) -> Callable:
+        def hook(model, input, output):
+            output = untuple(output)
+            mask = torch.ones(output[0].numel())
+            for idx in positions:
+                mask[int(idx)] = 0
+            mask = mask.to(device)
+            masked_output = list()
+            for elmt in output:
+                flattened_elmt = elmt.flatten()
+                masked_elmt = mask * flattened_elmt
+                masked_elmt = masked_elmt.view(elmt.shape)
+                masked_output.append(masked_elmt)
+            masked_output = torch.stack(masked_output, dim=0)
+            return masked_output
+
+        return hook
+
+    def forward(self, inputs_embeds, token_type_ids, attention_masks):
+        model_outputs = self.model(inputs_embeds=inputs_embeds, token_type_ids=token_type_ids,
+                                   attention_mask=attention_masks)
+        return model_outputs
+
+    def remove_hooks(self):
+        for handle in self.hooks_handles:
+            handle.remove()
+
+
+class RandomPruningModel(torch.nn.Module):
+    # Hook used to mask the output of some layer but picking randomly the units to mask
+    def __init__(self, model: torch.nn.Module, layer_names: Iterable, pruning_percentage: float, prune_input: bool,
+                 consider_input: bool):
+        super().__init__()
+        self.model = model
+        self.pruning_percentage = pruning_percentage
+        self.hooks_handles = list()
+        self.masks_per_layer = dict()  # We don't need to compute a mask every time we have an output. We do it once and then store it.
+        self.consider_input = consider_input
+
+        for layer_name in layer_names:
+            layer = dict([*self.model.named_modules()])[layer_name]
+            if prune_input:
+                self.hooks_handles.append(layer.register_forward_pre_hook(self.prune_inputs_hook(self.model.device)))
+            else:
+                self.hooks_handles.append(
+                    layer.register_forward_hook(self.prune_outputs_hook(layer_name, self.model.device)))
+
+    def prune_inputs_hook(self, device) -> Callable:
+        def pre_hook(model, args):
+            mask = torch.ones(args[0].numel())
+            nb_of_positions = int(args[0].numel() * self.pruning_percentage)
+            random_positions = torch.randint(0, args[0].numel(), (nb_of_positions,))
+            for idx in random_positions:
+                mask[int(idx)] = 0
+            mask = mask.to(device)
+            flattened_input = args[0].flatten()
+            masked_input = mask * flattened_input
+            return tuple(masked_input.view(args[0].shape).unsqueeze(dim=0))
+
+        return pre_hook
+
+    def prune_outputs_hook(self, name, device) -> Callable:
+        def hook(_, __, output):
+            output = untuple(output)
+            if name not in self.masks_per_layer.keys():
+                if self.consider_input:
+                    mask = torch.ones(output[0].numel())
+                    nb_of_positions_to_prune = int(output[0].numel() * self.pruning_percentage)
+                    random_positions = torch.randint(0, output[0].numel(), (nb_of_positions_to_prune,))
+                    for idx in random_positions:
+                        mask[int(idx)] = 0
+                    self.masks_per_layer[name] = mask
+                    del mask
+                else:
+                    mask = torch.ones(output[0].numel())
+                    nb_of_positions_to_prune = int(output[0].shape[1] * self.pruning_percentage)
+                    random_positions = torch.randint(0, output[0].shape[1], (nb_of_positions_to_prune,))
+                    for idx in random_positions:
+                        out_feature_to_full_positions = [idx + i * output[0].shape[1] for i in
+                                                         range(output[0].shape[0])]
+                        mask[out_feature_to_full_positions] = 0
+                    self.masks_per_layer[name] = mask
+                    del mask
+
+            mask_formatted = torch.stack([self.masks_per_layer[name]] * output.shape[0], dim=0).to(device)
+            return mask_formatted.view(output.shape) * output
+
+        return hook
+
+    def forward(self, inputs_embeds, token_type_ids, attention_masks):
+        model_outputs = self.model(inputs_embeds=inputs_embeds, token_type_ids=token_type_ids,
+                                   attention_mask=attention_masks)
+        return model_outputs
+
+    def remove_hooks(self):
+        for handle in self.hooks_handles:
+            handle.remove()
+
+
+class CustomDataset(torch.utils.data.Dataset):
+    # Used to store the samples seen by the model when computing the conductance
+    def __init__(self, inputs_embeddings: Iterable, token_type_ids: Iterable, attention_masks: Iterable):
+        self.inputs_embeddings = inputs_embeddings
+        self.token_type_ids = token_type_ids
+        self.attention_masks = attention_masks
+
+    def __len__(self):
+        return len(self.inputs_embeddings)
+
+    def __getitem__(self, idx):
+        return {"input_embeds": self.inputs_embeddings[idx], "token_type_ids": self.token_type_ids[idx],
+                "attention_mask": self.attention_masks[idx]}
+
+
+def split_list_by_values(lst: List, values: List) -> List:
+    """
+    Split a list of integers based on specified values.
+
+    :param List lst: List of integers to be split.
+    :param List values: List of values to use as split points.
+    :return List: A list of lists where the original list is split at each specified value.
+    """
+    result = []
+    current_chunk = []
+
+    for item in lst:
+        current_chunk.append(item)
+        if item in values:
+            if current_chunk:
+                result.append(current_chunk)
+                current_chunk = []
+
+    if current_chunk:
+        result.append(current_chunk)
+
+    return result
+
+
+def generate_baseline_with_only_padding_tokens(tokenizer: AutoTokenizer, input):
+    baseline = [tokenizer.pad_token_id for i in range(len(input[0]))]
+    return torch.Tensor([baseline]).to(torch.int)
+
+
+def generate_baseline_with_padded_query_and_passage_but_special_tokens(tokenizer: AutoTokenizer, input):
+    baseline = list()
+    for token in input[0]:
+        if token == tokenizer.cls_token_id:
+            baseline.append(token)
+        elif token == tokenizer.sep_token_id:
+            baseline.append(token)
+        else:
+            baseline.append(tokenizer.pad_token_id)
+    return torch.Tensor([baseline]).to(torch.int)
+
+
+def generate_baseline_with_padded_passage_but_special_tokens(tokenizer: AutoTokenizer, input):
+    baseline = list()
+    input_splitted = split_list_by_values(np.array(input[0]), [tokenizer.sep_token_id])
+    baseline.append(input_splitted[0])
+    for token in input_splitted[1]:
+        if token == tokenizer.sep_token_id:
+            baseline[0].append(token)
+        else:
+            baseline[0].append(tokenizer.pad_token_id)
+    return torch.Tensor(baseline).to(torch.int)
+
+
+def generate_baseline_with_padded_query_but_special_tokens(tokenizer: AutoTokenizer, input):
+    baseline = list()
+    input_splitted = split_list_by_values(np.array(input[0]), [tokenizer.sep_token_id])
+    for token in input_splitted[0]:
+        if token == tokenizer.cls_token_id:
+            baseline.append(token)
+        elif token == tokenizer.sep_token_id:
+            baseline.append(token)
+        else:
+            baseline.append(tokenizer.pad_token_id)
+
+    baseline.extend(input_splitted[1])
+    return torch.Tensor([baseline]).to(torch.int)
+
+
+def generate_baseline_with_padded_passage_and_no_special_tokens(tokenizer: AutoTokenizer, input):
+    baseline = list()
+    input_splitted = split_list_by_values(np.array(input[0]), [tokenizer.sep_token_id])
+    baseline.append(input_splitted[0])
+    for i in range(len(input_splitted[1])):
+        baseline[0].append(tokenizer.pad_token_id)
+    return torch.Tensor(baseline).to(torch.int)
+
+
+def generate_baseline_with_padded_query_and_no_special_tokens(tokenizer: AutoTokenizer, input):
+    input_splitted = split_list_by_values(np.array(input[0]), [tokenizer.sep_token_id])
+    baseline = [tokenizer.pad_token_id for i in range(len(input_splitted[0]))]
+    baseline.extend(input_splitted[1])
+    return torch.Tensor([baseline]).to(torch.int)
+
+
+def generate_baseline_with_unkown_tokens_for_query_and_passage_but_special_tokens(tokenizer: AutoTokenizer, input):
+    baseline = list()
+    for token in input[0]:
+        if token == tokenizer.cls_token_id:
+            baseline.append(token)
+        elif token == tokenizer.sep_token_id:
+            baseline.append(token)
+        else:
+            baseline.append(tokenizer.unk_token_id)
+    return torch.Tensor([baseline]).to(torch.int)
+
+
+def generate_baseline_with_only_unknown_tokens(tokenizer: AutoTokenizer, input):
+    baseline = [tokenizer.unk_token_id for i in range(len(input[0]))]
+    return torch.Tensor([baseline]).to(torch.int)
+
+
+def translate_whole_baseline(baseline_embeds):
+    return baseline_embeds - baseline_embeds
+
+
+def translate_only_passage(baseline_embeds, split_position: int):
+    new_baseline_embeds = list()
+    for idx, vector in enumerate(baseline_embeds[0]):
+        if idx >= split_position:
+            new_baseline_embeds.append(vector - vector)
+        else:
+            new_baseline_embeds.append(vector)
+    return torch.stack(new_baseline_embeds).unsqueeze(0)
+
+
+def _get_scaled_inputs(input_tensor, baseline_tensor, batch_size, num_reps, device, translate: bool):
+    """
+    Create `num_reps` groups of `batch_size` vectors of embeddings spanning between the
+    baseline and the input to analyze. If needed (variable `translate`), one can decide
+    to shift every embedding produced by this method by substracting the embeddings of
+    the baseline to ensure we are close to 0 for the prediction associated with it.
+
+    This function comes from the repository Integrated-Gradients:
+    https://github.com/ankurtaly/Integrated-Gradients/blob/master/BertModel/bert_model_utils.py#L275
+    """
+    list_scaled_embeddings = []
+    if translate:
+        scaled_embeddings = \
+            [(float(i) / (num_reps * batch_size - 1)) *
+             (input_tensor - baseline_tensor) for i in range(0, num_reps * batch_size)]
+    else:
+        scaled_embeddings = \
+            [baseline_tensor + (float(i) / (num_reps * batch_size - 1)) *
+             (input_tensor - baseline_tensor) for i in range(0, num_reps * batch_size)]
+
+    for i in range(num_reps):
+        list_scaled_embeddings.append(
+            torch.Tensor(np.array((scaled_embeddings[i * batch_size:i * batch_size +
+                                                                    batch_size]))).to(torch.float).to(device)
+        )
+
+    return list_scaled_embeddings
+
+
+def _calculate_integral(ig):
+    """
+    This function comes from the repository Integrated-Gradients:
+    https://github.com/ankurtaly/Integrated-Gradients/blob/master/BertModel/bert_model_utils.py#L295
+    """
+    # We use np.average here since the width of each
+    # step rectangle is 1/number of steps and the height is the gradient,
+    # so summing the areas is equivalent to averaging the gradient values.
+
+    ig = (ig[:-1] + ig[1:]) / 2.0  # trapezoidal rule
+
+    integral = torch.mean(ig, dim=0)
+
+    return integral
+
+
+def _get_ig_error(integrated_gradients, baseline_prediction, prediction,
+                  debug=False):
+    """
+    This function comes from the repository Integrated-Gradients:
+    https://github.com/ankurtaly/Integrated-Gradients/blob/master/BertModel/bert_model_utils.py#L256
+    """
+    sum_attributions = np.sum(integrated_gradients)
+
+    delta_prediction = prediction - baseline_prediction
+
+    error_percentage = \
+        100 * (delta_prediction - sum_attributions) / delta_prediction
+    if debug:
+        logging.info(f'prediction is {prediction}')
+        logging.info(f'baseline_prediction is {baseline_prediction}')
+        logging.info(f'delta_prediction is {delta_prediction}')
+        logging.info(f'sum_attributions are {sum_attributions}')
+        logging.info(f'Error percentage is {error_percentage}')
+
+    return error_percentage
+
+
+def visualize_token_attrs(tokens, attrs, html_file=None):
+    """
+      Visualize attributions for given set of tokens.
+      Args:
+      - tokens: An array of tokens
+      - attrs: An array of attributions, of same size as 'tokens',
+        with attrs[i] being the attribution to tokens[i]
+
+      Saves the HTML text into `html_file`.
+    """
+
+    def get_color(attr):
+        if attr > 0:
+            g = int(128 * attr) + 127
+            b = 128 - int(64 * attr)
+            r = 128 - int(64 * attr)
+        else:
+            g = 128 + int(64 * attr)
+            b = 128 + int(64 * attr)
+            r = int(-128 * attr) + 127
+        return r, g, b
+
+    # normalize attributions for visualization.
+    bound = max(abs(attrs.max()), abs(attrs.min()))
+    attrs = attrs / bound
+    html_text = ""
+    for i, tok in enumerate(tokens):
+        r, g, b = get_color(attrs[i])
+        html_text += f" <span style='color:rgb({r},{g},{b})' title='{attrs[i]:.4f}'>{tok}</span>"
+    if html_file is None:
+        return html_text
+    else:
+        html_file = open(html_file, "w")
+        html_file.write(html_text)
+        html_file.close()

@@ -1,0 +1,43 @@
+{
+  "name": "nig-viz",
+  "description": "A Marcelle Application",
+  "version": "0.0.0",
+  "keywords": [
+    "marcelle"
+  ],
+  "main": "public/bundle.js",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build"
+  },
+  "dependencies": {
+    "@marcellejs/core": "^0.6.5",
+    "@marcellejs/gui-widgets": "link:../marcelle/packages/gui-widgets",
+    "@marcellejs/layouts": "link:../marcelle/packages/layouts",
+    "@marcellejs/tensorflow": "link:../marcelle/packages/tensorflow",
+    "rxjs": "^7.8.1"
+  },
+  "devDependencies": {
+    "@marcellejs/devtools": "^0.6.5",
+    "@sveltejs/vite-plugin-svelte": "^4.0.0",
+    "eslint": "^9.7.0",
+    "eslint-config-prettier": "^9.1.0",
+    "eslint-plugin-svelte": "^2.36.0",
+    "globals": "^15.12.0",
+    "prettier": "^3.3.3",
+    "prettier-plugin-svelte": "^3.2.7",
+    "svelte": "^5.1.13",
+    "svelte-preprocess": "^6.0.3",
+    "vite": "^5.4.10"
+  },
+  "pnpm": {
+    "overrides": {
+      "@marcellejs/core": "link:../marcelle/packages/core",
+      "@marcellejs/gui-widgets": "link:../marcelle/packages/gui-widgets",
+      "@marcellejs/layouts": "link:../marcelle/packages/layouts",
+      "@marcellejs/devtools": "link:../marcelle/packages/devtools",
+      "@marcellejs/tensorflow": "link:../marcelle/packages/tensorflow"
+    }
+  }
+}
