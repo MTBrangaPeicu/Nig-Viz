@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # ~TODO~
 
 > A [Marcelle](https://marcelle.dev) Application
@@ -15,3 +16,6 @@ The page will reload if you make edits.
 
 Builds a static copy of your site to the `dist/` folder.
 Your app is ready to be deployed!
+=======
+# Nig-Viz
+>>>>>>> 200b1418153e3804431e776008e01fa168459e46
