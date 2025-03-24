@@ -5,6 +5,7 @@ import torch.nn.functional as F
 
 from utils import (
     generate_baseline_with_padded_query_and_passage_but_special_tokens,
+    generate_baseline_with_padded_query_but_special_tokens,
     _get_scaled_inputs,
     _calculate_integral,
     _get_ig_error,
@@ -27,7 +28,7 @@ def integrated_gradients(
         baseline_embeddings,
         num_reps,
         batch_size,
-        pred_positif=True
+        num_labels,
 ):
     """
     Compute the Integrated Gradients for a given input.
@@ -38,19 +39,21 @@ def integrated_gradients(
     :param _type_ baseline_embeddings: Embedding of the baseline for the input.
     :param _type_ num_reps: Number of forward pass.
     :param _type_ batch_size: Number of samples seen by the model in a forward pass (total nb of steps for IG is num_reps x batch_size).
-    :param bool pred_positif: Compute IG for the positive label or negative, defaults to True
+    :param _type_ num_labels: Number of output labels for the model.
     """
-    if pred_positif:
-        pos_to_watch = 1
-    else:
+    if num_labels == 1:
         pos_to_watch = 0
+        activation_fct = lambda x, dim: x
+    else: # Always watch for the positive class
+        pos_to_watch = 1
+        activation_fct = F.softmax
+
     list_scaled_embeddings = _get_scaled_inputs(
         input_embeddings[0].cpu().detach().numpy(),
         baseline_embeddings[0].cpu().detach().numpy(),
         batch_size=batch_size,
         num_reps=num_reps,
         device=model.device,
-        translate=True
     )
 
     scores = list()  # Stores the scores for each input between the baseline and the original input
@@ -60,7 +63,7 @@ def integrated_gradients(
         batch_inputs = torch.Tensor(list_scaled_embeddings[i]).to(torch.float)
         batch_inputs.requires_grad = True
         outputs = model(inputs_embeds=batch_inputs, token_type_ids=token_type_ids, attention_mask=attention_mask)
-        outputs = F.softmax(outputs.logits, dim=-1)
+        outputs = activation_fct(outputs.logits, dim=-1)
         sum_outputs = torch.sum(outputs, dim=0)
 
         model.zero_grad()
@@ -89,8 +92,10 @@ def integrated_gradients(
 
 def predict(query, passage, num_reps, batch_size):
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = AutoModelForSequenceClassification.from_pretrained("castorini/monobert-large-msmarco").to(device)
+    model = AutoModelForSequenceClassification.from_pretrained("cross-encoder/ms-marco-MiniLM-L12-v2").to(device)
     model.eval()
+
+    num_labels = model.config.num_labels
 
     tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
 
@@ -110,12 +115,12 @@ def predict(query, passage, num_reps, batch_size):
     # Baseline gradient
     logging.info("### Baseline ###")
     baseline_inputs = inputs.copy()
-    baseline_inputs["input_ids"] = generate_baseline_with_padded_query_and_passage_but_special_tokens(
+    baseline_embeds = generate_baseline_with_padded_query_and_passage_but_special_tokens(
         tokenizer,
-        baseline_inputs["input_ids"]
+        baseline_inputs["input_ids"],
+        embeddings,
+        device
     )
-
-    baseline_embeds = embeddings(baseline_inputs["input_ids"].to(model.device))
 
     ig = integrated_gradients(
         model=model,
@@ -125,7 +130,7 @@ def predict(query, passage, num_reps, batch_size):
         baseline_embeddings=baseline_embeds,
         num_reps=num_reps,
         batch_size=batch_size,
-        pred_positif=True,
+        num_labels=num_labels,
     )
 
     tokens = tokenizer.convert_ids_to_tokens(inputs["input_ids"][0])

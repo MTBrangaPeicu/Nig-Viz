@@ -2,13 +2,20 @@ import torch
 import logging
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
-from utils import visualize_token_attrs, generate_baseline_with_padded_query_and_passage_but_special_tokens
+from utils import (
+    visualize_token_attrs,
+    generate_baseline_with_padded_query_but_special_tokens,
+    generate_baseline_with_padded_query_and_passage_but_special_tokens,
+    generate_baseline_with_only_padded_tokens
+)
 from integrated_gradients import integrated_gradients
 
 if __name__ == '__main__':
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = AutoModelForSequenceClassification.from_pretrained("castorini/monobert-large-msmarco").to(device)
+    model = AutoModelForSequenceClassification.from_pretrained("cross-encoder/ms-marco-MiniLM-L12-v2").to(device)
     model.eval()
+
+    num_labels = model.config.num_labels
 
     tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
 
@@ -33,11 +40,12 @@ if __name__ == '__main__':
     # Baseline gradient
     logging.info("### Baseline ###")
     baseline_inputs = inputs.copy()
-    baseline_inputs["input_ids"] = generate_baseline_with_padded_query_and_passage_but_special_tokens(tokenizer,
-                                                                                                      baseline_inputs[
-                                                                                                          "input_ids"])
-
-    baseline_embeds = embeddings(baseline_inputs["input_ids"].to(device))
+    baseline_embeds = generate_baseline_with_padded_query_and_passage_but_special_tokens(
+        tokenizer,
+        baseline_inputs["input_ids"],
+        embeddings,
+        device
+    )
 
     ig = integrated_gradients(
         model=model,
@@ -47,7 +55,7 @@ if __name__ == '__main__':
         baseline_embeddings=baseline_embeds,
         num_reps=20,
         batch_size=10,
-        pred_positif=True,
+        num_labels=num_labels,
     )
 
     html_path = "./html_text_manthan_x_xylem_and_phloem.html"

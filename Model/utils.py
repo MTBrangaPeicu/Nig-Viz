@@ -317,39 +317,15 @@ def split_list_by_values(lst: List, values: List) -> List:
 
     return result
 
-
-def generate_baseline_with_only_padding_tokens(tokenizer: AutoTokenizer, input):
-    baseline = [tokenizer.pad_token_id for i in range(len(input[0]))]
-    return torch.Tensor([baseline]).to(torch.int)
-
-
-def generate_baseline_with_padded_query_and_passage_but_special_tokens(tokenizer: AutoTokenizer, input):
+def generate_baseline_with_only_padded_tokens(tokenizer: AutoTokenizer, input, model_embedding, device: torch.DeviceObjType):
     baseline = list()
     for token in input[0]:
-        if token == tokenizer.cls_token_id:
-            baseline.append(token)
-        elif token == tokenizer.sep_token_id:
-            baseline.append(token)
-        else:
-            baseline.append(tokenizer.pad_token_id)
-    return torch.Tensor([baseline]).to(torch.int)
+        baseline.append(tokenizer.pad_token_id)
+    return model_embedding(torch.Tensor([baseline]).to(torch.int).to(device))
 
-
-def generate_baseline_with_padded_passage_but_special_tokens(tokenizer: AutoTokenizer, input):
+def generate_baseline_with_padded_query_and_passage_but_special_tokens(tokenizer: AutoTokenizer, input, model_embedding, device: torch.DeviceObjType):
     baseline = list()
-    input_splitted = split_list_by_values(np.array(input[0]), [tokenizer.sep_token_id])
-    baseline.append(input_splitted[0])
-    for token in input_splitted[1]:
-        if token == tokenizer.sep_token_id:
-            baseline[0].append(token)
-        else:
-            baseline[0].append(tokenizer.pad_token_id)
-    return torch.Tensor(baseline).to(torch.int)
-
-
-def generate_baseline_with_padded_query_but_special_tokens(tokenizer: AutoTokenizer, input):
-    baseline = list()
-    input_splitted = split_list_by_values(np.array(input[0]), [tokenizer.sep_token_id])
+    input_splitted = split_list_by_values(np.array(input[0].cpu()), [tokenizer.sep_token_id])
     for token in input_splitted[0]:
         if token == tokenizer.cls_token_id:
             baseline.append(token)
@@ -357,62 +333,37 @@ def generate_baseline_with_padded_query_but_special_tokens(tokenizer: AutoTokeni
             baseline.append(token)
         else:
             baseline.append(tokenizer.pad_token_id)
-
-    baseline.extend(input_splitted[1])
-    return torch.Tensor([baseline]).to(torch.int)
-
-
-def generate_baseline_with_padded_passage_and_no_special_tokens(tokenizer: AutoTokenizer, input):
-    baseline = list()
-    input_splitted = split_list_by_values(np.array(input[0]), [tokenizer.sep_token_id])
-    baseline.append(input_splitted[0])
-    for i in range(len(input_splitted[1])):
-        baseline[0].append(tokenizer.pad_token_id)
-    return torch.Tensor(baseline).to(torch.int)
-
-
-def generate_baseline_with_padded_query_and_no_special_tokens(tokenizer: AutoTokenizer, input):
-    input_splitted = split_list_by_values(np.array(input[0]), [tokenizer.sep_token_id])
-    baseline = [tokenizer.pad_token_id for i in range(len(input_splitted[0]))]
-    baseline.extend(input_splitted[1])
-    return torch.Tensor([baseline]).to(torch.int)
-
-
-def generate_baseline_with_unkown_tokens_for_query_and_passage_but_special_tokens(tokenizer: AutoTokenizer, input):
-    baseline = list()
-    for token in input[0]:
+    for token in input_splitted[1]:
         if token == tokenizer.cls_token_id:
             baseline.append(token)
         elif token == tokenizer.sep_token_id:
             baseline.append(token)
         else:
-            baseline.append(tokenizer.unk_token_id)
-    return torch.Tensor([baseline]).to(torch.int)
+            baseline.append(tokenizer.pad_token_id)
+    return model_embedding(torch.Tensor([baseline]).to(torch.int).to(device))
 
 
-def generate_baseline_with_only_unknown_tokens(tokenizer: AutoTokenizer, input):
-    baseline = [tokenizer.unk_token_id for i in range(len(input[0]))]
-    return torch.Tensor([baseline]).to(torch.int)
-
-
-def translate_whole_baseline(baseline_embeds):
-    return baseline_embeds - baseline_embeds
-
-
-def translate_only_passage(baseline_embeds, split_position: int):
-    new_baseline_embeds = list()
-    for idx, vector in enumerate(baseline_embeds[0]):
-        if idx >= split_position:
-            new_baseline_embeds.append(vector - vector)
+def generate_baseline_with_padded_query_but_special_tokens(tokenizer: AutoTokenizer, input, model_embedding, device: torch.DeviceObjType):
+    baseline = list()
+    input_splitted = split_list_by_values(np.array(input[0].cpu()), [tokenizer.sep_token_id])
+    for token in input_splitted[0]:
+        if token == tokenizer.cls_token_id:
+            baseline.append(token)
+        elif token == tokenizer.sep_token_id:
+            baseline.append(token)
         else:
-            new_baseline_embeds.append(vector)
-    return torch.stack(new_baseline_embeds).unsqueeze(0)
+            baseline.append(tokenizer.pad_token_id)
+    if len(input_splitted) == 3:
+        baseline.extend(input_splitted[1]+input_splitted[2])
+    else:
+        baseline.extend(input_splitted[1])
+    return model_embedding(torch.Tensor([baseline]).to(torch.int).to(device))
 
 
-def _get_scaled_inputs(input_tensor, baseline_tensor, batch_size, num_reps, device, translate: bool):
+def _get_scaled_inputs(input_tensor, baseline_tensor, batch_size, num_reps, device):
     """
-    Create `num_reps` groups of `batch_size` vectors of embeddings spanning between the
-    baseline and the input to analyze. If needed (variable `translate`), one can decide
+    Create `num_reps` groups of `batch_size` vectors of embeddings spanning between the 
+    baseline and the input to analyze. If needed (variable `translate`), one can decide 
     to shift every embedding produced by this method by substracting the embeddings of
     the baseline to ensure we are close to 0 for the prediction associated with it.
 
@@ -420,22 +371,19 @@ def _get_scaled_inputs(input_tensor, baseline_tensor, batch_size, num_reps, devi
     https://github.com/ankurtaly/Integrated-Gradients/blob/master/BertModel/bert_model_utils.py#L275
     """
     list_scaled_embeddings = []
-    if translate:
-        scaled_embeddings = \
-            [(float(i) / (num_reps * batch_size - 1)) *
-             (input_tensor - baseline_tensor) for i in range(0, num_reps * batch_size)]
-    else:
-        scaled_embeddings = \
-            [baseline_tensor + (float(i) / (num_reps * batch_size - 1)) *
-             (input_tensor - baseline_tensor) for i in range(0, num_reps * batch_size)]
+
+    scaled_embeddings = \
+        [baseline_tensor + (float(i) / (num_reps * batch_size - 1)) *
+        (input_tensor - baseline_tensor) for i in range(0, num_reps * batch_size)]
 
     for i in range(num_reps):
         list_scaled_embeddings.append(
             torch.Tensor(np.array((scaled_embeddings[i * batch_size:i * batch_size +
-                                                                    batch_size]))).to(torch.float).to(device)
+                                                      batch_size]))).to(torch.float).to(device)
         )
 
     return list_scaled_embeddings
+
 
 
 def _calculate_integral(ig):
@@ -504,7 +452,8 @@ def visualize_token_attrs(tokens, attrs, html_file=None):
     html_text = ""
     for i, tok in enumerate(tokens):
         r, g, b = get_color(attrs[i])
-        html_text += f" <span style='color:rgb({r},{g},{b})' title='{attrs[i]:.4f}'>{tok}</span>"
+        html_text += " <span style='color:rgb(%d,%d,%d)'>%s</span>" % \
+                     (r, g, b, tok)
     if html_file is None:
         return html_text
     else:
