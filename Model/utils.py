@@ -1,7 +1,7 @@
 import torch
 import numpy as np
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
-from typing import Callable, Iterable, Dict, List
+from typing import Callable, Iterable, Dict, List, Optional
 import gc
 
 import logging
@@ -11,24 +11,40 @@ logging.basicConfig(level=logging.INFO)
 import json
 
 
-def get_interesting_modules() -> Dict:
+def filter_module(module: str, keywords: List[str]):
+    return any(word in module for word in keywords)
+
+def get_interesting_modules(model, list_regex: Optional[List[str]] = None) -> Dict:
     """
     Returns a dictionnary containing the name of the interesting modules in the model.
 
     :return Dict: Dictionnary where the key is the module's name and the value is the number of out features.
     """
-    model = AutoModelForSequenceClassification.from_pretrained("castorini/monobert-large-msmarco")
-
-    interesting_layers = ["query", "value", "key", "dense",
-                          "activation"]  # As we start from the embeddings, we don't want to include them in our analysis
-    forbidden_layers = ["embeddings", "pooler", "LayerNorm"]
-    neurons_per_layers = dict()
+    interesting_layers = ["self.query", "self.value", "self.key", "self.dropout", "intermediate.dense", "output.dense"]
+    neurons_per_layers = dict() 
+    total_nb_of_neurons = 0
     for name, module in model.named_modules():
-        splitted_name = name.split(".")
-        if splitted_name[-1] in interesting_layers and not any(i in forbidden_layers for i in splitted_name):
-            neurons_per_layers[name] = module.out_features
+        if any(word in name for word in interesting_layers):
+            if list_regex is not None:
+                if filter_module(name, list_regex):
+                    if hasattr(module, 'out_features'):
+                        neurons_per_layers[name] = module.out_features
+                        total_nb_of_neurons += module.out_features
+                    else:
+                        # This corresponds to the dropout which is in fact used to target the attention_probs of shape [batch_size, num_heads, seq_length, seq_length].
+                        # So number of neurons here is: num_heads * seq_length.
+                        neurons_per_layers[name] = model.config.num_attention_heads 
+                        total_nb_of_neurons += model.config.num_attention_heads
+            else:
+                if hasattr(module, 'out_features'):
+                    neurons_per_layers[name] = module.out_features
+                    total_nb_of_neurons += module.out_features
+                else:
+                    neurons_per_layers[name] = model.config.num_attention_heads
+                    total_nb_of_neurons += model.config.num_attention_heads
 
-    return neurons_per_layers
+    return neurons_per_layers, total_nb_of_neurons
+
 
 
 class NumpyArrayEncoder(json.JSONEncoder):
@@ -102,38 +118,50 @@ class InputsExtractor(torch.nn.Module):
 
 class OutputsExtractor(torch.nn.Module):
     # SAme as InputsExtractor but to extract outputs instead
-    def __init__(self, model: torch.nn.Module, token_type_ids: Iterable[torch.Tensor],
-                 attention_mask: Iterable[torch.Tensor], layer_names: Iterable[str]):
+    def __init__(self, model: torch.nn.Module, layer_names: Iterable[str]):
         super().__init__()
         self.model = model
-        self.token_type_ids = token_type_ids
-        self.attention_mask = attention_mask
-        self.outputs = dict()
         self.outputs_store = dict()
+        self.previous_outputs_store = dict()
         self.hooks_handles = list()
 
         for layer_name in layer_names:
             layer = dict([*self.model.named_modules()])[layer_name]
-            self.hooks_handles.append(layer.register_forward_hook(self.save_outputs_hooks(layer_name)))
-
-    @property
-    def items(self):
-        return self.outputs
-
-    @property
-    def items_store(self):
-        return self.outputs_store
+            if "dropout" in layer_name:
+                self.hooks_handles.append(layer.register_forward_hook(self.get_attention_probs(layer_name)))
+            else:
+                self.hooks_handles.append(layer.register_forward_hook(self.save_outputs_hooks(layer_name)))
 
     def save_outputs_hooks(self, name) -> Callable:
         def hook(_, __, output):
-            self.outputs[name] = untuple(output)  # Store it and prepares it for backprop
-            self.outputs[name].retain_grad()
-
-            if name in self.outputs_store.keys():
-                self.outputs_store[name].append(untuple(output.clone().detach().cpu()))
+            if not name in self.outputs_store.keys():
+                # If self.pos_outputs is empty, it means we are at the first forward pass
+                self.outputs_store[name] = untuple(output) # Store it and prepares it for backprop
+                self.outputs_store[name].retain_grad()
             else:
-                self.outputs_store[name] = [untuple(output.clone().detach().cpu())]
+                # Else, we store the previous output and the current one
+                self.previous_outputs_store[name] = self.outputs_store[name].clone().detach().cpu()
+                self.outputs_store[name] = untuple(output) # Store it and prepares it for backprop
+                self.outputs_store[name].retain_grad()
 
+        return hook
+    
+    def get_attention_probs(self, name) -> Callable:
+        # This hook is used to get to the `attention_probs`` (see SelfAttention module in modeling_bert.py in
+        # the transformers library). As this is the input of the self.dropout, we can access it through the hook.
+        def hook(_, input, __):
+            nonlocal name
+            new_name = name.replace("dropout", "attention_probs")
+            if not new_name in self.outputs_store.keys():
+                # If self.pos_outputs is empty, it means we are at the first forward pass
+                self.outputs_store[new_name] = untuple(input) # Store it and prepares it for backprop
+                self.outputs_store[new_name].retain_grad()
+            else:
+                # Else, we store the previous output and the current one
+                self.previous_outputs_store[new_name] = self.outputs_store[new_name].clone().detach().cpu()
+                self.outputs_store[new_name] = untuple(input) # Store it and prepares it for backprop
+                self.outputs_store[new_name].retain_grad()
+            
         return hook
 
     def remove_hooks(self):
@@ -141,157 +169,20 @@ class OutputsExtractor(torch.nn.Module):
             handle.remove()
 
     def clear_items(self):
-        del self.outputs
+        del self.outputs_store
+        del self.previous_outputs_store
         gc.collect()
         torch.cuda.empty_cache()
-        self.outputs = dict()
+        self.outputs_store = dict()
+        self.previous_outputs_store = dict()
 
-    def forward(self, inputs_embeddings):
-        model_outputs = self.model(inputs_embeds=inputs_embeddings, token_type_ids=self.token_type_ids,
-                                   attention_mask=self.attention_mask)
+    def forward(self, inputs_embeddings, token_type_ids, attention_mask):
+        model_outputs = self.model(
+            inputs_embeds=inputs_embeddings, 
+            token_type_ids=token_type_ids,
+            attention_mask=attention_mask
+        )
         return model_outputs
-
-
-class PrunedModel(torch.nn.Module):
-    # Hook used to mask the output of some layer given a pruning scheme
-    def __init__(self, model: torch.nn.Module, positions_per_module: Dict, prune_input: bool):
-        super().__init__()
-        self.model = model
-        self.hooks_handles = list()
-
-        for layer_name, layer in positions_per_module.items():
-            layer = dict([*self.model.named_modules()])[layer_name]
-            if prune_input:
-                self.hooks_handles.append(layer.register_forward_pre_hook(
-                    self.prune_inputs_hook(self.model.device, positions_per_module[layer_name])))
-            else:
-                self.hooks_handles.append(layer.register_forward_hook(
-                    self.prune_outputs_hook(self.model.device, positions_per_module[layer_name])))
-
-    def prune_inputs_hook(self, device, positions: Iterable) -> Callable:
-        def pre_hook(model, args):
-            mask = torch.ones(args[0].numel())
-            for idx in positions:
-                mask[int(idx)] = 0
-            mask = mask.to(device)
-            flattened_input = args[0].flatten()
-            masked_input = mask * flattened_input
-            return tuple(masked_input.view(args[0].shape).unsqueeze(dim=0))
-
-        return pre_hook
-
-    def prune_outputs_hook(self, device, positions: Iterable) -> Callable:
-        def hook(model, input, output):
-            output = untuple(output)
-            mask = torch.ones(output[0].numel())
-            for idx in positions:
-                mask[int(idx)] = 0
-            mask = mask.to(device)
-            masked_output = list()
-            for elmt in output:
-                flattened_elmt = elmt.flatten()
-                masked_elmt = mask * flattened_elmt
-                masked_elmt = masked_elmt.view(elmt.shape)
-                masked_output.append(masked_elmt)
-            masked_output = torch.stack(masked_output, dim=0)
-            return masked_output
-
-        return hook
-
-    def forward(self, inputs_embeds, token_type_ids, attention_masks):
-        model_outputs = self.model(inputs_embeds=inputs_embeds, token_type_ids=token_type_ids,
-                                   attention_mask=attention_masks)
-        return model_outputs
-
-    def remove_hooks(self):
-        for handle in self.hooks_handles:
-            handle.remove()
-
-
-class RandomPruningModel(torch.nn.Module):
-    # Hook used to mask the output of some layer but picking randomly the units to mask
-    def __init__(self, model: torch.nn.Module, layer_names: Iterable, pruning_percentage: float, prune_input: bool,
-                 consider_input: bool):
-        super().__init__()
-        self.model = model
-        self.pruning_percentage = pruning_percentage
-        self.hooks_handles = list()
-        self.masks_per_layer = dict()  # We don't need to compute a mask every time we have an output. We do it once and then store it.
-        self.consider_input = consider_input
-
-        for layer_name in layer_names:
-            layer = dict([*self.model.named_modules()])[layer_name]
-            if prune_input:
-                self.hooks_handles.append(layer.register_forward_pre_hook(self.prune_inputs_hook(self.model.device)))
-            else:
-                self.hooks_handles.append(
-                    layer.register_forward_hook(self.prune_outputs_hook(layer_name, self.model.device)))
-
-    def prune_inputs_hook(self, device) -> Callable:
-        def pre_hook(model, args):
-            mask = torch.ones(args[0].numel())
-            nb_of_positions = int(args[0].numel() * self.pruning_percentage)
-            random_positions = torch.randint(0, args[0].numel(), (nb_of_positions,))
-            for idx in random_positions:
-                mask[int(idx)] = 0
-            mask = mask.to(device)
-            flattened_input = args[0].flatten()
-            masked_input = mask * flattened_input
-            return tuple(masked_input.view(args[0].shape).unsqueeze(dim=0))
-
-        return pre_hook
-
-    def prune_outputs_hook(self, name, device) -> Callable:
-        def hook(_, __, output):
-            output = untuple(output)
-            if name not in self.masks_per_layer.keys():
-                if self.consider_input:
-                    mask = torch.ones(output[0].numel())
-                    nb_of_positions_to_prune = int(output[0].numel() * self.pruning_percentage)
-                    random_positions = torch.randint(0, output[0].numel(), (nb_of_positions_to_prune,))
-                    for idx in random_positions:
-                        mask[int(idx)] = 0
-                    self.masks_per_layer[name] = mask
-                    del mask
-                else:
-                    mask = torch.ones(output[0].numel())
-                    nb_of_positions_to_prune = int(output[0].shape[1] * self.pruning_percentage)
-                    random_positions = torch.randint(0, output[0].shape[1], (nb_of_positions_to_prune,))
-                    for idx in random_positions:
-                        out_feature_to_full_positions = [idx + i * output[0].shape[1] for i in
-                                                         range(output[0].shape[0])]
-                        mask[out_feature_to_full_positions] = 0
-                    self.masks_per_layer[name] = mask
-                    del mask
-
-            mask_formatted = torch.stack([self.masks_per_layer[name]] * output.shape[0], dim=0).to(device)
-            return mask_formatted.view(output.shape) * output
-
-        return hook
-
-    def forward(self, inputs_embeds, token_type_ids, attention_masks):
-        model_outputs = self.model(inputs_embeds=inputs_embeds, token_type_ids=token_type_ids,
-                                   attention_mask=attention_masks)
-        return model_outputs
-
-    def remove_hooks(self):
-        for handle in self.hooks_handles:
-            handle.remove()
-
-
-class CustomDataset(torch.utils.data.Dataset):
-    # Used to store the samples seen by the model when computing the conductance
-    def __init__(self, inputs_embeddings: Iterable, token_type_ids: Iterable, attention_masks: Iterable):
-        self.inputs_embeddings = inputs_embeddings
-        self.token_type_ids = token_type_ids
-        self.attention_masks = attention_masks
-
-    def __len__(self):
-        return len(self.inputs_embeddings)
-
-    def __getitem__(self, idx):
-        return {"input_embeds": self.inputs_embeddings[idx], "token_type_ids": self.token_type_ids[idx],
-                "attention_mask": self.attention_masks[idx]}
 
 
 def split_list_by_values(lst: List, values: List) -> List:

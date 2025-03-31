@@ -134,4 +134,4 @@ def predict(query, passage, num_reps, batch_size):
     )
 
     tokens = tokenizer.convert_ids_to_tokens(inputs["input_ids"][0])
-    return {"tokens": tokens, "attributions": ig.tolist()}
+    return {"tokens": tokens, "attributions": ig}
