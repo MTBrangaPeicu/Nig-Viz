@@ -1,3 +1,4 @@
+import asyncio
 import torch
 import numpy as np
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
@@ -351,3 +352,18 @@ def visualize_token_attrs(tokens, attrs, html_file=None):
         html_file = open(html_file, "w")
         html_file.write(html_text)
         html_file.close()
+
+
+def log_progress(step: int, total_steps: int, websocket=None):
+    """
+    Log progress and optionally send updates via WebSocket.
+
+    :param step: Current step in the process.
+    :param total_steps: Total number of steps.
+    :param websocket: WebSocket connection to send updates (optional).
+    """
+    progress_message = f"Progress: {step}/{total_steps} ({(step / total_steps) * 100:.2f}%)"
+    logging.info(progress_message)
+
+    if websocket:
+        asyncio.run(websocket.send_json({"step": step, "total_steps": total_steps, "progress": (step / total_steps) * 100}))

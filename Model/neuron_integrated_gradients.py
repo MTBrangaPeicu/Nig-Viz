@@ -5,7 +5,12 @@ import torch.nn.functional as F
 from tqdm import tqdm
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 import gc
-from utils import OutputsExtractor, _get_ig_error, _get_scaled_inputs, generate_baseline_with_padded_query_and_passage_but_special_tokens, get_interesting_modules
+from utils import (
+    OutputsExtractor, 
+    _get_ig_error, 
+    _get_scaled_inputs, 
+    get_interesting_modules
+)
 
 
 def neuron_integrated_gradients(
@@ -95,20 +100,60 @@ def neuron_integrated_gradients(
     torch.cuda.empty_cache() 
     return path_gradients, errors if compute_error else None           
 
-def aggregate_nig(nig, use_norm=False):
-    """ Aggregate the neuron importance values into a single value per neuron. """
+def aggregate_nig(nig, sep_position=None, use_norm=False):
+    """ 
+    Aggregate the neuron importance values into a single value per neuron for each token type.
+    
+    :param nig: Dictionary of neuron importance values.
+    :param sep_position: Position of the first SEP token (int).
+    :param use_norm: Whether to use L2 norm for aggregation.
+    :return: Aggregated neuron importance values with shape (384, 5) if sep_position is provided, else (384,).
+    """
     aggregated_nig = {}
     for key, nig_tensor in nig.items():
-        nig_tensor = nig_tensor.clone().detach() 
-        if use_norm:
-            nig_aggregated = torch.norm(nig_tensor, p=2, dim=1)  # L2 norm over tokens
-        else:
-            nig_aggregated = torch.sum(nig_tensor, dim=1)  # Sum over tokens
-        final_nig = torch.mean(nig_aggregated, dim=0)  # Mean over batch
-        aggregated_nig[key] = final_nig.numpy()
-    return aggregated_nig  # Shape: (384,) or (1536,)
+        nig_tensor = nig_tensor.clone().detach()
+        
+        if sep_position is not None:
+            # Define masks based on token positions
+            cls_mask = torch.zeros(nig_tensor.size(1), dtype=torch.bool)
+            cls_mask[0] = True  # CLS token is always at position 0
 
-def nig_predict(query, passage, num_reps, batch_size):
+            query_mask = torch.zeros(nig_tensor.size(1), dtype=torch.bool)
+            query_mask[1:sep_position] = True  # Query tokens are between CLS and the first SEP
+
+            sep1_mask = torch.zeros(nig_tensor.size(1), dtype=torch.bool)
+            sep1_mask[sep_position] = True  # First SEP token
+
+            passage_mask = torch.zeros(nig_tensor.size(1), dtype=torch.bool)
+            passage_mask[sep_position + 1:-1] = True  # Passage tokens are between the first and second SEP
+
+            sep2_mask = torch.zeros(nig_tensor.size(1), dtype=torch.bool)
+            sep2_mask[-1] = True  # Second SEP token
+
+            # Aggregate for each token type
+            masks = [cls_mask, query_mask, sep1_mask, passage_mask, sep2_mask]
+            token_type_values = []
+            for mask in masks:
+                masked_tensor = nig_tensor[:, mask]  # Apply mask to filter tokens
+                if use_norm:
+                    aggregated = torch.norm(masked_tensor, p=2, dim=1)  # L2 norm over tokens
+                else:
+                    aggregated = torch.sum(masked_tensor, dim=1)  # Sum over tokens
+                token_type_values.append(torch.mean(aggregated, dim=0))  # Mean over batch
+
+            # Stack values for all token types
+            aggregated_nig[key] = torch.stack(token_type_values, dim=0).numpy()  # Shape: (384, 5)
+        else:
+            # Aggregate across all tokens if sep_position is not provided
+            if use_norm:
+                nig_aggregated = torch.norm(nig_tensor, p=2, dim=1)  # L2 norm over tokens
+            else:
+                nig_aggregated = torch.sum(nig_tensor, dim=1)  # Sum over tokens
+            aggregated_nig[key] = torch.mean(nig_aggregated, dim=0).numpy()  # Shape: (384,)
+
+    return aggregated_nig
+
+def nig_predict(query, passage, num_reps, batch_size, baseline_function,split_by_type):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = AutoModelForSequenceClassification.from_pretrained("cross-encoder/ms-marco-MiniLM-L12-v2").to(device)
     model.eval()
@@ -127,20 +172,26 @@ def nig_predict(query, passage, num_reps, batch_size):
         return_tensors="pt"
     ).to(model.device)
 
-    print(inputs["input_ids"])
+    print(inputs["input_ids"])  
+
+    # Find the position of the first [SEP] token
+    sep_token_id = tokenizer.sep_token_id
+    sep_position = (inputs["input_ids"] == sep_token_id).nonzero(as_tuple=True)[1][0].item()
+    print(f"Position of the first [SEP] token: {sep_position}")
 
     embeddings = model.bert.get_input_embeddings()
     input_embeds = embeddings(inputs["input_ids"])
 
-    print(input_embeds.shape)
+    print(input_embeds.shape)  
 
     # Baseline gradient
     baseline_inputs = inputs.copy()
-    baseline_embeds = generate_baseline_with_padded_query_and_passage_but_special_tokens(
+    baseline_embeds = baseline_function(
         tokenizer,
         baseline_inputs["input_ids"],
         embeddings,
         device
+
     )
 
     nig, error = neuron_integrated_gradients(
@@ -154,5 +205,10 @@ def nig_predict(query, passage, num_reps, batch_size):
         num_labels=num_labels,
     )
 
-    final_nig = aggregate_nig(nig)
+    #print(split_by_type)
+    if split_by_type:
+         final_nig = aggregate_nig(nig, sep_position)      
+    else:
+        final_nig = aggregate_nig(nig)
+
     return final_nig, error

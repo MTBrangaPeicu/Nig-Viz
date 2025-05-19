@@ -4,12 +4,9 @@ from tqdm import tqdm
 import torch.nn.functional as F
 
 from utils import (
-    generate_baseline_with_padded_query_and_passage_but_special_tokens,
-    generate_baseline_with_padded_query_but_special_tokens,
     _get_scaled_inputs,
     _calculate_integral,
     _get_ig_error,
-    visualize_token_attrs,
 )
 
 import torch
@@ -29,6 +26,7 @@ def integrated_gradients(
         num_reps,
         batch_size,
         num_labels,
+        progress_callback=None,  # <-- new argument
 ):
     """
     Compute the Integrated Gradients for a given input.
@@ -40,6 +38,7 @@ def integrated_gradients(
     :param _type_ num_reps: Number of forward pass.
     :param _type_ batch_size: Number of samples seen by the model in a forward pass (total nb of steps for IG is num_reps x batch_size).
     :param _type_ num_labels: Number of output labels for the model.
+    :param progress_callback: Optional callback function to report progress.
     """
     if num_labels == 1:
         pos_to_watch = 0
@@ -71,6 +70,10 @@ def integrated_gradients(
         path_gradients.append(batch_inputs.grad.data)
         scores.append(outputs)
 
+        # Progress callback after each predict call
+        if progress_callback is not None:
+            progress_callback(i + 1, num_reps)
+
     baseline_prediction = scores[0][0]
     prediction = scores[-1][-1]
 
@@ -86,11 +89,12 @@ def integrated_gradients(
     integrated_gradients = np.sum(integrated_gradients, axis=-1)
     print(integrated_gradients)
 
-    _get_ig_error(integrated_gradients, baseline_prediction[pos_to_watch], prediction[pos_to_watch], debug=True)
-    return integrated_gradients
+    error = _get_ig_error(integrated_gradients, baseline_prediction[pos_to_watch], prediction[pos_to_watch], debug=True)
+    #print("IG Error:", error, "Type:", type(error)) 
+    return integrated_gradients, error.item()
 
 
-def predict(query, passage, num_reps, batch_size):
+def predict(query, passage, num_reps, batch_size, baseline_function, progress_callback=None):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = AutoModelForSequenceClassification.from_pretrained("cross-encoder/ms-marco-MiniLM-L12-v2").to(device)
     model.eval()
@@ -115,14 +119,15 @@ def predict(query, passage, num_reps, batch_size):
     # Baseline gradient
     logging.info("### Baseline ###")
     baseline_inputs = inputs.copy()
-    baseline_embeds = generate_baseline_with_padded_query_and_passage_but_special_tokens(
+    baseline_embeds = baseline_function(
         tokenizer,
         baseline_inputs["input_ids"],
         embeddings,
         device
+
     )
 
-    ig = integrated_gradients(
+    ig, error = integrated_gradients(
         model=model,
         input_embeddings=input_embeds,
         token_type_ids=inputs["token_type_ids"],
@@ -131,7 +136,8 @@ def predict(query, passage, num_reps, batch_size):
         num_reps=num_reps,
         batch_size=batch_size,
         num_labels=num_labels,
+        progress_callback=progress_callback,  # <-- pass callback
     )
 
     tokens = tokenizer.convert_ids_to_tokens(inputs["input_ids"][0])
-    return {"tokens": tokens, "attributions": ig}
+    return {"tokens": tokens, "attributions": ig}, error
