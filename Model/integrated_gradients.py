@@ -26,7 +26,7 @@ def integrated_gradients(
         num_reps,
         batch_size,
         num_labels,
-        progress_callback=None,  # <-- new argument
+        progress_callback=None,  # Optional callback for progress updates
 ):
     """
     Compute the Integrated Gradients for a given input.

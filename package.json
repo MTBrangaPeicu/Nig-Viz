@@ -9,9 +9,11 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build"
+    "build": "vite build",
+    "backend": "marcelle-backend"
   },
   "dependencies": {
+    "@marcellejs/backend": "^0.6.5",
     "@marcellejs/core": "^0.6.5",
     "@marcellejs/gui-widgets": "link:../marcelle/packages/gui-widgets",
     "@marcellejs/layouts": "link:../marcelle/packages/layouts",
@@ -37,7 +39,8 @@
       "@marcellejs/gui-widgets": "link:../marcelle/packages/gui-widgets",
       "@marcellejs/layouts": "link:../marcelle/packages/layouts",
       "@marcellejs/devtools": "link:../marcelle/packages/devtools",
-      "@marcellejs/tensorflow": "link:../marcelle/packages/tensorflow"
+      "@marcellejs/tensorflow": "link:../marcelle/packages/tensorflow",
+      "@marcellejs/backend": "link:../marcelle/packages/backend"
     }
   }
 }

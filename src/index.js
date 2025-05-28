@@ -4,9 +4,17 @@ import '@marcellejs/layouts/dist/marcelle-layouts.css';
 import * as core from '@marcellejs/core';
 import * as widgets from '@marcellejs/gui-widgets';
 import { dashboard } from '@marcellejs/layouts';
-import { nigtable, progressbar } from './components';
+import { nigtable, nigModel} from './components';
+import { progressBar } from '@marcellejs/gui-widgets';
+import { map } from 'rxjs';
 
-// Side Constant panel
+const store = core.dataStore('http://localhost:3030');
+
+// Create separate models for IG and NIG connecting to Python service
+const igModelInstance = nigModel(store, 'predictions');
+const nigModelInstance = nigModel(store, 'nig-values'); 
+
+// Inputs and widgets
 const queryInput = widgets.textArea('Enter your query here');
 queryInput.title = 'Query';
 const passageInput = widgets.textArea('Enter your passage here');
@@ -23,225 +31,140 @@ outputError.title = 'Error';
 const toggleSplit = widgets.toggle(false);
 toggleSplit.title = 'Split into token types';
 toggleSplit.$checked.subscribe((x) => {
-    if (x) {
-        toggleSplit.$text.next('True');
-    } else {
-        toggleSplit.$text.next('False');
-    }
+  toggleSplit.$text.next(x ? 'True' : 'False');
 });
 
-// Add number inputs for batch size and number of repetitions
-const batchSizeInput = widgets.number(10); // Default value: 10
+const batchSizeInput = widgets.number(10);
 batchSizeInput.title = 'Batch Size';
 
-const numRepsInput = widgets.number(20); // Default value: 20
+const numRepsInput = widgets.number(20);
 numRepsInput.title = 'Number of Repetitions';
 
-// NIG explroation
 const tableNIGS = nigtable();
 tableNIGS.title = 'NIG values';
 
-// Progress bar for server response
-const progress = progressbar();
+// Use relevant models for progress bars
+const progIG = progressBar(igModelInstance.$status.pipe(map(x => ({ ...x, message: x.status }))));
+const progNIG = progressBar(nigModelInstance.$status.pipe(map(x => ({ ...x, message: x.status }))));
 
-// Keep a reference to the current progress WebSocket
-let progressWS = null;
-let pendingOpenProgressWS = false;
-
-// Dropdown for selecting a layer
-const layerDropdown = widgets.select(['Loading...']); 
+const layerDropdown = widgets.select(['Loading...']);
 layerDropdown.title = 'Select Layer';
 
-// Dropdown for selecting a baseline
 const baselineDropdown = widgets.select([
-    'Only Padded Tokens',
-    'Padded Query and Passage (Special Tokens Preserved)',
-    'Padded Query (Special Tokens Preserved)',
+  'Only Padded Tokens',
+  'Padded Query and Passage (Special Tokens Preserved)',
+  'Padded Query (Special Tokens Preserved)',
 ]);
 baselineDropdown.title = 'Select Baseline';
 
-// Ensure options are updated before rendering
-layerDropdown.$value.subscribe(selectedLayer => {
-    if (!layerDropdown.options || layerDropdown.options.length === 0) {
-        console.warn('Layer dropdown options are not yet populated.');
-    }
+function getColor(attr) {
+  let r, g, b;
+  if (attr > 0) {
+    g = Math.min(255, 128 + Math.floor(127 * attr));
+    b = Math.min(255, 128 - Math.floor(64 * attr));
+    r = Math.min(255, 128 - Math.floor(64 * attr));
+  } else {
+    g = Math.min(255, 128 + Math.floor(64 * attr));
+    b = Math.min(255, 128 + Math.floor(64 * attr));
+    r = Math.min(255, 127 - Math.floor(128 * attr));
+  }
+  return `rgb(${r},${g},${b})`;
+}
+
+function getBaselineType(selectedBaseline) {
+  return selectedBaseline === 'Only Padded Tokens' ? 0
+    : selectedBaseline === 'Padded Query and Passage (Special Tokens Preserved)' ? 1
+    : selectedBaseline === 'Padded Query (Special Tokens Preserved)' ? 2
+    : null;
+}
+
+// IG Prediction submit
+submitQuery.$click.subscribe(() => {
+  igModelInstance.predict({
+    query: queryInput.$value.getValue(),
+    passage: passageInput.$value.getValue(),
+    batch_size: batchSizeInput.$value.getValue(),
+    num_reps: numRepsInput.$value.getValue(),
+    baseline_type: getBaselineType(baselineDropdown.$value.getValue()),
+    type: 'ig'
+  });
 });
 
-// Set up the dashboard with the components
+// NIG Prediction submit
+submitNIG.$click.subscribe(() => {
+  nigModelInstance.predict({
+    query: queryInput.$value.getValue(),
+    passage: passageInput.$value.getValue(),
+    batch_size: batchSizeInput.$value.getValue(),
+    num_reps: numRepsInput.$value.getValue(),
+    baseline_type: getBaselineType(baselineDropdown.$value.getValue()),
+    split_type: toggleSplit.$checked.getValue(),
+    type: 'nig'
+  });
+});
+
+// Handle IG results
+igModelInstance.$data.subscribe(doc => {
+  if (!doc || !doc.result) return;
+  
+  if (doc.result.tokens && doc.result.attributions) {
+    const { tokens, attributions, error } = doc.result;
+    const html = tokens.map((token, i) => {
+      const color = getColor(attributions[i]);
+      return `<span style="color:${color}" title="${attributions[i].toFixed(4)}">${token}</span>`;
+    }).join(" ");
+    outputText.$value.next(`${html}<br><br>Baseline Error: ${error?.toFixed(4) ?? 'N/A'}`);
+  }
+});
+
+// Handle NIG results
+nigModelInstance.$data.subscribe(doc => {
+  if (!doc || !doc.result) return;
+
+  if (doc.result.nig) {
+    const nig = doc.result.nig;
+    const layers = Object.keys(nig);
+    
+    // Always update dropdown options and value
+    layerDropdown.$options.next(layers.length > 0 ? layers : ['No layers available']);
+    layerDropdown.$value.next(layers.length > 0 ? layers[0] : 'No layers available');
+
+    // Update table for first layer
+    if (layers.length > 0) {
+      tableNIGS.$options.next({
+        layer: layers[0],
+        values: nig[layers[0]]
+      });
+    }
+  }
+});
+
+//Subscribe to layerDropdown.$value
+layerDropdown.$value.subscribe(layer => {
+  const doc = nigModelInstance.$data.getValue();
+  const nig = doc && doc.result && doc.result.nig;
+  if (nig && nig[layer]) {
+    tableNIGS.$options.next({
+      layer,
+      values: nig[layer],
+    });
+  } else if (nig) {
+    tableNIGS.$options.next({ error: 'Invalid layer or no data' });
+  }
+});
+
+// Dashboard
 const dash = dashboard({
   title: 'Integrated Gradients Visualization',
   author: 'ISIR',
 });
 
 dash.page('Query Review')
-    .sidebar(queryInput, passageInput) 
-    .use([batchSizeInput, numRepsInput, baselineDropdown, submitQuery], progress, [outputText]);
+  .sidebar( queryInput, passageInput)
+  .use([batchSizeInput, numRepsInput, baselineDropdown, submitQuery], progIG, [outputText]);
 
 dash.page('NIG values')
-    .sidebar(queryInput, passageInput, batchSizeInput, numRepsInput, baselineDropdown, submitNIG) 
-    .use([layerDropdown,toggleSplit], [tableNIGS]);
+  .sidebar(queryInput, passageInput, batchSizeInput, numRepsInput, baselineDropdown, submitNIG)
+  .use([layerDropdown, toggleSplit], progNIG, [tableNIGS]);
 
-// Function to get color based on IG value
-function getColor(attr) {
-    let r, g, b;
-    if (attr > 0) {
-        g = Math.min(255, Math.max(0, 128 + Math.floor(127 * attr)));
-        b = Math.min(255, Math.max(0, 128 - Math.floor(64 * attr)));
-        r = Math.min(255, Math.max(0, 128 - Math.floor(64 * attr)));
-    } else {
-        g = Math.min(255, Math.max(0, 128 + Math.floor(64 * attr)));
-        b = Math.min(255, Math.max(0, 128 + Math.floor(64 * attr)));
-        r = Math.min(255, Math.max(0, 127 - Math.floor(128 * attr)));
-    }
-    return `rgb(${r},${g},${b})`;
-}
-
-// Function to map baseline selection to corresponding index
-function getBaselineType(selectedBaseline) {
-    return selectedBaseline === 'Only Padded Tokens' ? 0 :
-           selectedBaseline === 'Padded Query and Passage (Special Tokens Preserved)' ? 1 :
-           selectedBaseline === 'Padded Query (Special Tokens Preserved)' ? 2 : null;
-}
-
-// Handle the submit button click
-submitQuery.$click.subscribe(() => {
-    const query = queryInput.$value.getValue();
-    const passage = passageInput.$value.getValue();
-    const batchSize = batchSizeInput.$value.getValue();
-    const numReps = numRepsInput.$value.getValue();
-    const baselineType = getBaselineType(baselineDropdown.$value.getValue());
-
-    progress.updateProgress(0); // Reset progress bar immediately
-
-    // Make a POST request to the backend
-    fetch('http://127.0.0.1:8000/predict', {
-        method: 'POST',
-        body: JSON.stringify({ 
-            query, 
-            passage, 
-            batch_size: batchSize, 
-            num_reps: numReps, 
-            baseline_type: baselineType 
-        }),
-        headers: {
-            'Content-Type': 'application/json',
-        },
-    })
-        .then(response => response.json())
-        .then(data => {
-            const tokens = data.tokens;
-            const attributions = data.attributions;
-            const baselineError = data.error;
-
-            //console.log('Baseline Error:', baselineError, 'Type:', typeof baselineError); 
-
-            let html = tokens.map((token, index) => {
-                const attr = attributions[index];
-                const color = getColor(attr);
-                return `<span style="color:${color}" title="${attr.toFixed(4)}">${token}</span>`;
-            }).join(" ");
-
-            outputText.$value.next(`${html}<br><br>Baseline Error: ${baselineError.toFixed(4)}`);
-        })
-        .catch(error => {
-            console.error('Error:', error);
-            outputText.$value.next('An error occurred while fetching the prediction.');
-        });
-    
-
-    connectProgressWebSocket(); // Connect to WebSocket for progress updates
-});
-
-submitNIG.$click.subscribe(() => {
-    const query = queryInput.$value.getValue();
-    const passage = passageInput.$value.getValue();
-    const batchSize = batchSizeInput.$value.getValue();
-    const numReps = numRepsInput.$value.getValue();
-    const baselineType = getBaselineType(baselineDropdown.$value.getValue());
-    const splitType = toggleSplit.$checked.getValue();
-
-    progress.updateProgress(0); // Reset progress bar immediately
-
-    // Make a POST request to the backend
-    fetch('http://127.0.0.1:8000/nig_predict', {
-        method: 'POST',
-        body: JSON.stringify({ query: query, passage: passage, batch_size: batchSize, num_reps: numReps, baseline_type: baselineType, split_type: splitType }),
-        headers: {
-            'Content-Type': 'application/json',
-        },
-    })
-        .then(response => response.json())
-        .then(data => {
-            const nig = data.nig;
-            // Update Layer Dropdown
-            const layerOptions = Object.keys(nig);
-            if (layerOptions.length > 0) {
-                layerDropdown.$options.next(layerOptions); // Update dropdown options
-                layerDropdown.$value.next(layerOptions[0]); // Set the first layer as the default selected value
-            } else {
-                layerDropdown.$options.next(['No layers available']); // Fallback if no layers are available
-                layerDropdown.$value.next('No layers available');
-            }
-            // Handle layer selection
-            layerDropdown.$value.subscribe((selectedLayer) => {
-                console.log('Selected Layer:', selectedLayer); // Log the selected layer for debugging
-
-                if (selectedLayer && nig[selectedLayer]) {
-                    tableNIGS.$options.next({
-                        layer: selectedLayer,
-                        values: nig[selectedLayer] || [], // Ensure values are not null
-                    }); // Update table with selected layer's values
-                } else {
-                    console.warn(`Invalid layer selected or missing data for: ${selectedLayer}`);
-                    tableNIGS.$options.next({ error: 'Invalid layer selected or missing data.' }); // Handle invalid selection
-                }
-            });
-        })
-        .catch(error => {
-            console.error('Error:', error);
-            tableNIGS.$value.next('An error occurred while fetching the prediction.');
-            layerDropdown.$options.next(['Error fetching layers']); 
-            layerDropdown.$value.next('Error fetching layers'); 
-        });
-
-    connectProgressWebSocket(); // Connect to WebSocket for progress updates
-});
-
-// Function to handle WebSocket connection for progress updates
-function connectProgressWebSocket() {
-    // If a WebSocket is already open or closing, close it and wait for it to close before opening a new one
-    if (progressWS && progressWS.readyState !== WebSocket.CLOSED) {
-        pendingOpenProgressWS = true;
-        progressWS.onclose = () => {
-            progressWS = null;
-            pendingOpenProgressWS = false;
-            connectProgressWebSocket(); // Now open the new one
-        };
-        progressWS.close();
-        return;
-    }
-    // Prevent multiple opens if already pending
-    if (pendingOpenProgressWS) return;
-
-    progressWS = new WebSocket("ws://127.0.0.1:8000/progress");
-
-    progressWS.onmessage = (event) => {
-        const data = JSON.parse(event.data);
-        if (data.progress !== undefined) {
-            progress.updateProgress(data.progress);
-        }
-    };
-
-    progressWS.onerror = (error) => {
-        console.error("WebSocket error:", error);
-    };
-
-    progressWS.onclose = () => {
-        progressWS = null;
-        pendingOpenProgressWS = false;
-        console.log("WebSocket connection closed.");
-    };
-}
-
-// Show the dashboard
 dash.show();

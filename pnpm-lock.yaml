@@ -10,11 +10,15 @@ overrides:
   '@marcellejs/layouts': link:../marcelle/packages/layouts
   '@marcellejs/devtools': link:../marcelle/packages/devtools
   '@marcellejs/tensorflow': link:../marcelle/packages/tensorflow
+  '@marcellejs/backend': link:../marcelle/packages/backend
 
 importers:
 
   .:
     dependencies:
+      '@marcellejs/backend':
+        specifier: link:../marcelle/packages/backend
+        version: link:../marcelle/packages/backend
       '@marcellejs/core':
         specifier: link:../marcelle/packages/core
         version: link:../marcelle/packages/core

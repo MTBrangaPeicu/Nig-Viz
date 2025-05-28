@@ -1,0 +1,122 @@
+{
+  "host": "localhost",
+  "port": 3030,
+  "public": "./backend/public/",
+  "origins": [
+    "http://localhost:3030"
+  ],
+  "paginate": {
+    "default": 10,
+    "max": 50
+  },
+  "mongodb": "mongodb://localhost:27017/mihai_datastore_example",
+  "whitelist": {
+    "services": "*",
+    "assets": [
+      "jpg",
+      "jpeg",
+      "png",
+      "wav"
+    ]
+  },
+  "authentication": {
+    "enabled": false,
+    "allowSignup": false,
+    "entity": "user",
+    "service": "users",
+    "secret": "QnksTHWnxvIcN74yeDHf18sMYGr8565j",
+    "authStrategies": [
+      "jwt",
+      "local",
+      "anonymous"
+    ],
+    "jwtOptions": {
+      "header": {
+        "typ": "access"
+      },
+      "audience": "https://yourdomain.com",
+      "algorithm": "HS256",
+      "expiresIn": "1d"
+    },
+    "local": {
+      "usernameField": "email",
+      "passwordField": "password"
+    }
+  },
+  "permissions": {
+    "superadmin": [
+      {
+        "action": "manage",
+        "subject": "all"
+      }
+    ],
+    "admin": [
+      {
+        "action": "manage",
+        "subject": "all",
+        "conditions": {
+          "userId": "${user._id}"
+        }
+      },
+      {
+        "action": "manage",
+        "subject": "all",
+        "conditions": {
+          "public": "${true}"
+        }
+      },
+      {
+        "action": "manage",
+        "subject": "users"
+      }
+    ],
+    "editor": [
+      {
+        "action": "manage",
+        "subject": "all",
+        "conditions": {
+          "userId": "${user._id}"
+        }
+      },
+      {
+        "action": "manage",
+        "subject": "all",
+        "conditions": {
+          "public": "${true}"
+        }
+      },
+      {
+        "action": "read",
+        "subject": "users",
+        "conditions": {
+          "_id": "${user._id}"
+        }
+      },
+      {
+        "action": "update",
+        "subject": "users",
+        "conditions": {
+          "_id": "${user._id}"
+        }
+      },
+      {
+        "action": "delete",
+        "subject": "users",
+        "conditions": {
+          "_id": "${user._id}"
+        },
+        "inverted": "true"
+      }
+    ],
+    "anonymous": [
+      {
+        "action": "read",
+        "subject": "all",
+        "conditions": {
+          "public": "${true}"
+        }
+      }
+    ]
+  },
+  "database": "mongodb"
+}
