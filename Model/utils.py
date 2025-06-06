@@ -15,34 +15,25 @@ import json
 def filter_module(module: str, keywords: List[str]):
     return any(word in module for word in keywords)
 
-def get_interesting_modules(model, list_regex: Optional[List[str]] = None) -> Dict:
+def get_interesting_modules(model) -> Dict:
     """
     Returns a dictionnary containing the name of the interesting modules in the model.
 
     :return Dict: Dictionnary where the key is the module's name and the value is the number of out features.
     """
-    interesting_layers = ["self.query", "self.value", "self.key", "self.dropout", "intermediate.dense", "output.dense"]
+    interesting_layers = ["self.dropout", "intermediate.dense"]
     neurons_per_layers = dict() 
     total_nb_of_neurons = 0
     for name, module in model.named_modules():
         if any(word in name for word in interesting_layers):
-            if list_regex is not None:
-                if filter_module(name, list_regex):
-                    if hasattr(module, 'out_features'):
-                        neurons_per_layers[name] = module.out_features
-                        total_nb_of_neurons += module.out_features
-                    else:
-                        # This corresponds to the dropout which is in fact used to target the attention_probs of shape [batch_size, num_heads, seq_length, seq_length].
-                        # So number of neurons here is: num_heads * seq_length.
-                        neurons_per_layers[name] = model.config.num_attention_heads 
-                        total_nb_of_neurons += model.config.num_attention_heads
+            if hasattr(module, 'out_features'):
+                neurons_per_layers[name] = module.out_features
+                total_nb_of_neurons += module.out_features
             else:
-                if hasattr(module, 'out_features'):
-                    neurons_per_layers[name] = module.out_features
-                    total_nb_of_neurons += module.out_features
-                else:
-                    neurons_per_layers[name] = model.config.num_attention_heads
-                    total_nb_of_neurons += model.config.num_attention_heads
+                # This corresponds to the dropout which is in fact used to target the attention_probs of shape [batch_size, num_heads, seq_length, seq_length].
+                # So number of neurons here is: num_heads * seq_length.
+                neurons_per_layers[name] = model.config.num_attention_heads 
+                total_nb_of_neurons += model.config.num_attention_heads
 
     return neurons_per_layers, total_nb_of_neurons
 
@@ -130,8 +121,11 @@ class OutputsExtractor(torch.nn.Module):
             layer = dict([*self.model.named_modules()])[layer_name]
             if "dropout" in layer_name:
                 self.hooks_handles.append(layer.register_forward_hook(self.get_attention_probs(layer_name)))
+                #print(layer_name)
             else:
                 self.hooks_handles.append(layer.register_forward_hook(self.save_outputs_hooks(layer_name)))
+
+        #print(self.hooks_handles)
 
     def save_outputs_hooks(self, name) -> Callable:
         def hook(_, __, output):

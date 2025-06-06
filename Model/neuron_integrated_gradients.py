@@ -23,6 +23,7 @@ def neuron_integrated_gradients(
     batch_size: int, 
     num_labels: int,
     compute_error: bool = False,
+    progress_callback=None,
 ) -> Dict:
     """
     Compute the attribution (Neuron Integrated Gradients) of each unit for all the interesting modules in the model.
@@ -35,6 +36,7 @@ def neuron_integrated_gradients(
     :param int num_label: Number of output labels for the model.
     :param int num_reps: Number of iteration to approximate the integrated gradients.
     :param int batch_size: Batch size used for each iteration (true number of steps is batch_size x num_reps).
+    :param progress_callback: Optional callback function to report progress.
     :return Dict: Attribution for each activation unit for each layer in the model.
     """
     if num_labels == 1:
@@ -46,10 +48,9 @@ def neuron_integrated_gradients(
 
     layer_names, _ = get_interesting_modules(
         model=model,
-        list_regex=None # at this point we don't want to filter the modules for now
     )
 
-
+    #print(layer_names)
     extractor = OutputsExtractor(
         model=model,
         layer_names=layer_names,
@@ -62,6 +63,7 @@ def neuron_integrated_gradients(
         num_reps=num_reps, 
         device=model.device
     ) 
+    
     all_outputs = list()
     path_gradients = dict() # Stores the gradient corresponding to each input wrt the output 
 
@@ -88,6 +90,10 @@ def neuron_integrated_gradients(
                 # Store the product and accumulate them along the path
                 path_gradients[key] = prod if i == 1 else path_gradients[key] + prod 
         
+        # Progress callback after each predict call
+        if progress_callback is not None:
+            progress_callback(i + 1, num_reps)
+
     extractor.clear_items()
     extractor.remove_hooks()
 
@@ -153,7 +159,7 @@ def aggregate_nig(nig, sep_position=None, use_norm=False):
 
     return aggregated_nig
 
-def nig_predict(query, passage, num_reps, batch_size, baseline_function,split_by_type):
+def nig_predict(query, passage, num_reps, batch_size, baseline_function,split_by_type, progress_callback=None):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = AutoModelForSequenceClassification.from_pretrained("cross-encoder/ms-marco-MiniLM-L12-v2").to(device)
     model.eval()
@@ -203,9 +209,12 @@ def nig_predict(query, passage, num_reps, batch_size, baseline_function,split_by
         num_reps=num_reps,
         batch_size=batch_size,
         num_labels=num_labels,
+        progress_callback=progress_callback,
     )
 
-    #print(split_by_type)
+    print(nig.keys())
+    print(nig["bert.encoder.layer.0.attention.self.attention_probs"].shape)
+    print(nig["bert.encoder.layer.0.intermediate.dense"].shape)
     if split_by_type:
          final_nig = aggregate_nig(nig, sep_position)      
     else:

@@ -132,7 +132,7 @@
 </script>
 
 <div>
-	<h3 class="my-color">Layer: {options.layer || "None selected"} Shape: {JSON.stringify(getShape(options.values))}</h3>
+	<h3 class="my-color">Layer: {options.layer || "None selected"} | Token Type: {options.tokenType || "None selected"} | Shape: {JSON.stringify(getShape(options.values))}</h3>
 	<p><strong>Values:</strong> {JSON.stringify(options.values || "No values available")}</p>
 	<div id="violin-plot"></div>
 </div>

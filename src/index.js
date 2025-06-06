@@ -4,7 +4,7 @@ import '@marcellejs/layouts/dist/marcelle-layouts.css';
 import * as core from '@marcellejs/core';
 import * as widgets from '@marcellejs/gui-widgets';
 import { dashboard } from '@marcellejs/layouts';
-import { nigtable, nigModel} from './components';
+import { nigtable, nigModel, architecture} from './components';
 import { progressBar } from '@marcellejs/gui-widgets';
 import { map } from 'rxjs';
 
@@ -153,6 +153,36 @@ layerDropdown.$value.subscribe(layer => {
   }
 });
 
+const architectureComponent = architecture();
+architectureComponent.title = 'Architecture Grid';
+
+architectureComponent.$selection.subscribe(({ layer, tokenType }) => {
+  console.log("Button Clicked - Layer:", layer, "Token Type:", tokenType);
+
+  const doc = nigModelInstance.$data.getValue();
+  const nig = doc && doc.result && doc.result.nig;
+  const layerKey = `bert.encoder.layer.${layer}.intermediate.dense`; // Correct layer key format
+  console.log("Constructed Layer Key:", layerKey);
+
+  if (nig && nig[layerKey]) {
+    const tokenIndex = ['cls', 'qry', 'sep1', 'doc', 'sep2'].indexOf(tokenType); // Map tokenType to index
+    if (tokenIndex !== -1 && Array.isArray(nig[layerKey])) {
+      console.log("Subset Array:", nig[layerKey][tokenIndex]);
+      tableNIGS.$options.next({
+        layer: layerKey,
+        tokenType,
+        values: nig[layerKey][tokenIndex], // Pass the subset array to the nigtable
+      });
+    } else {
+      console.log("Error: Invalid token type or no data available");
+      tableNIGS.$options.next({ error: 'Invalid token type or no data available' });
+    }
+  } else {
+    console.log("Error: Invalid layer or no data available");
+    tableNIGS.$options.next({ error: 'Invalid layer or no data available' });
+  }
+});
+
 // Dashboard
 const dash = dashboard({
   title: 'Integrated Gradients Visualization',
@@ -164,7 +194,7 @@ dash.page('Query Review')
   .use([batchSizeInput, numRepsInput, baselineDropdown, submitQuery], progIG, [outputText]);
 
 dash.page('NIG values')
-  .sidebar(queryInput, passageInput, batchSizeInput, numRepsInput, baselineDropdown, submitNIG)
-  .use([layerDropdown, toggleSplit], progNIG, [tableNIGS]);
+  .sidebar(queryInput, passageInput, batchSizeInput, numRepsInput, baselineDropdown, toggleSplit, submitNIG)
+  .use(layerDropdown, architectureComponent, progNIG, [tableNIGS]);
 
 dash.show();

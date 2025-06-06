@@ -138,8 +138,12 @@ def handle_nig_prediction(doc):
         split_type = doc.get("split_type", False)
         baseline_func = BASELINE_MAP.get(baseline_type)
 
+        def progress_callback(current, total):
+            progress = current / total
+            nig_service.patch(id, {"progress": progress})
+
         nig_result, error = nig_predict(
-            query, passage, num_reps, batch_size, baseline_func, split_type
+            query, passage, num_reps, batch_size, baseline_func, split_type, progress_callback
         )
 
         formatted_result = {
