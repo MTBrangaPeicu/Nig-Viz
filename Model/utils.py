@@ -1,21 +1,19 @@
-import asyncio
 import torch
 import numpy as np
-from transformers import AutoTokenizer, AutoModelForSequenceClassification
+from transformers import AutoTokenizer
 from typing import Callable, Iterable, Dict, List, Optional
 import gc
+import json
 
 import logging
 
 logging.basicConfig(level=logging.INFO)
 
-import json
-
 
 def filter_module(module: str, keywords: List[str]):
     return any(word in module for word in keywords)
 
-def get_interesting_modules(model) -> Dict:
+def get_interesting_modules(model, list_regex: Optional[List[str]] = None) -> Dict:
     """
     Returns a dictionnary containing the name of the interesting modules in the model.
 
@@ -26,14 +24,23 @@ def get_interesting_modules(model) -> Dict:
     total_nb_of_neurons = 0
     for name, module in model.named_modules():
         if any(word in name for word in interesting_layers):
-            if hasattr(module, 'out_features'):
-                neurons_per_layers[name] = module.out_features
-                total_nb_of_neurons += module.out_features
+            if list_regex is not None:
+                if filter_module(name, list_regex):
+                    if hasattr(module, 'out_features'):
+                        neurons_per_layers[name] = module.out_features
+                        total_nb_of_neurons += module.out_features
+                    else:
+                        # This corresponds to the dropout which is in fact used to target the attention_probs of shape [batch_size, num_heads, seq_length, seq_length].
+                        # So number of neurons here is: num_heads * seq_length.
+                        neurons_per_layers[name] = model.config.num_attention_heads 
+                        total_nb_of_neurons += model.config.num_attention_heads
             else:
-                # This corresponds to the dropout which is in fact used to target the attention_probs of shape [batch_size, num_heads, seq_length, seq_length].
-                # So number of neurons here is: num_heads * seq_length.
-                neurons_per_layers[name] = model.config.num_attention_heads 
-                total_nb_of_neurons += model.config.num_attention_heads
+                if hasattr(module, 'out_features'):
+                    neurons_per_layers[name] = module.out_features
+                    total_nb_of_neurons += module.out_features
+                else:
+                    neurons_per_layers[name] = model.config.num_attention_heads
+                    total_nb_of_neurons += model.config.num_attention_heads
 
     return neurons_per_layers, total_nb_of_neurons
 
@@ -114,18 +121,14 @@ class OutputsExtractor(torch.nn.Module):
         super().__init__()
         self.model = model
         self.outputs_store = dict()
-        self.previous_outputs_store = dict()
         self.hooks_handles = list()
 
         for layer_name in layer_names:
             layer = dict([*self.model.named_modules()])[layer_name]
             if "dropout" in layer_name:
                 self.hooks_handles.append(layer.register_forward_hook(self.get_attention_probs(layer_name)))
-                #print(layer_name)
             else:
                 self.hooks_handles.append(layer.register_forward_hook(self.save_outputs_hooks(layer_name)))
-
-        #print(self.hooks_handles)
 
     def save_outputs_hooks(self, name) -> Callable:
         def hook(_, __, output):
@@ -135,7 +138,6 @@ class OutputsExtractor(torch.nn.Module):
                 self.outputs_store[name].retain_grad()
             else:
                 # Else, we store the previous output and the current one
-                self.previous_outputs_store[name] = self.outputs_store[name].clone().detach().cpu()
                 self.outputs_store[name] = untuple(output) # Store it and prepares it for backprop
                 self.outputs_store[name].retain_grad()
 
@@ -153,7 +155,6 @@ class OutputsExtractor(torch.nn.Module):
                 self.outputs_store[new_name].retain_grad()
             else:
                 # Else, we store the previous output and the current one
-                self.previous_outputs_store[new_name] = self.outputs_store[new_name].clone().detach().cpu()
                 self.outputs_store[new_name] = untuple(input) # Store it and prepares it for backprop
                 self.outputs_store[new_name].retain_grad()
             
@@ -165,11 +166,9 @@ class OutputsExtractor(torch.nn.Module):
 
     def clear_items(self):
         del self.outputs_store
-        del self.previous_outputs_store
         gc.collect()
         torch.cuda.empty_cache()
         self.outputs_store = dict()
-        self.previous_outputs_store = dict()
 
     def forward(self, inputs_embeddings, token_type_ids, attention_mask):
         model_outputs = self.model(
@@ -346,18 +345,3 @@ def visualize_token_attrs(tokens, attrs, html_file=None):
         html_file = open(html_file, "w")
         html_file.write(html_text)
         html_file.close()
-
-
-def log_progress(step: int, total_steps: int, websocket=None):
-    """
-    Log progress and optionally send updates via WebSocket.
-
-    :param step: Current step in the process.
-    :param total_steps: Total number of steps.
-    :param websocket: WebSocket connection to send updates (optional).
-    """
-    progress_message = f"Progress: {step}/{total_steps} ({(step / total_steps) * 100:.2f}%)"
-    logging.info(progress_message)
-
-    if websocket:
-        asyncio.run(websocket.send_json({"step": step, "total_steps": total_steps, "progress": (step / total_steps) * 100}))

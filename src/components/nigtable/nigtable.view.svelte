@@ -1,144 +1,156 @@
-<svelte:options />
-
 <script>
-	import { onDestroy, afterUpdate } from 'svelte';
-	import * as d3 from 'd3';
-
-	let options = {};
-	let unsubscribe;
-
-	// Subscribe to the reactive options store
 	export let options$;
-	if (options$) {
-		unsubscribe = options$.subscribe((value) => {
-			options = value;
-			if (options.values) {
-				drawViolinPlot(options.values);
-			}
-		});
-	}
+	let options = {};
 
-	onDestroy(() => {
-		if (unsubscribe) unsubscribe();
+	options$.subscribe(value => {
+		options = value;
 	});
 
-	// Helper function to calculate shape
+	const TOKEN_TYPES = ['cls', 'qry', 'sep1', 'doc', 'sep2'];
+
 	function getShape(values) {
 		if (Array.isArray(values)) {
 			if (Array.isArray(values[0])) {
-				return [values[0].length, values.length]; // 2D array shape
+				if (Array.isArray(values[0][0])) {
+					return [values.length, values[0].length, values[0][0].length];
+				}
+				return [values.length, values[0].length];
 			}
-			return [values.length]; // 1D array shape
+			return [values.length];
 		}
-		return "NA"; // Not an array
+		return "NA";
 	}
 
-	// Function to draw the violin plot
-	function drawViolinPlot(data) {
-		// Clear existing SVG
-		d3.select("#violin-plot").selectAll("*").remove();
+	function getColorScale(val, min, max) {
+		// Normalize value between min and max
+		const norm = (val - min) / (max - min);
+		const level = Math.round(255 * (1 - norm)); // Scale towards black
+		return `rgb(${level}, ${level}, ${level})`;
+	}
 
-		// Set dimensions and margins
-		const margin = { top: 10, right: 30, bottom: 30, left: 40 },
-			width = 460 - margin.left - margin.right,
-			height = 400 - margin.top - margin.bottom;
+	function formatValue(value) {
+		return value.toExponential(2); // Format value in scientific notation with 3 decimal places
+	}
 
-		// Append the SVG object
-		const svg = d3
-			.select("#violin-plot")
-			.append("svg")
-			.attr("width", width + margin.left + margin.right)
-			.attr("height", height + margin.top + margin.bottom)
-			.append("g")
-			.attr("transform", `translate(${margin.left},${margin.top})`);
+	// FFN-specific calculations
+	let sortedFFN = [];
+	let minFFN = 0;
+	let maxFFN = 1;
 
-		// Prepare data for the violin plot
-		const tokenTypes = Object.keys(data); // Assume data is an object with token types as keys
-		const flattenedData = tokenTypes.flatMap((key) => data[key].flat());
-		const y = d3.scaleLinear().domain(d3.extent(flattenedData)).range([height, 0]);
-		svg.append("g").call(d3.axisLeft(y));
+	$: if (options.type === 'FFN' && Array.isArray(options.values)) {
+		sortedFFN = options.values
+			.map((val, i) => ({ index: i, val }))
+			.sort((a, b) => b.val - a.val);
+		minFFN = Math.min(...sortedFFN.map(x => x.val));
+		maxFFN = Math.max(...sortedFFN.map(x => x.val));
+	}
 
-		const x = d3
-			.scaleBand()
-			.range([0, width])
-			.domain(tokenTypes)
-			.padding(0.05);
-		svg.append("g").attr("transform", `translate(0,${height})`).call(d3.axisBottom(x));
+	// ATTN-specific calculations
+	let scoredHeads = [];
+	let minHeadScore = 0;
+	let maxHeadScore = 1;
 
-		tokenTypes.forEach((token) => {
-			const tokenData = data[token].flat();
-			const histogram = d3
-				.histogram()
-				.domain(y.domain())
-				.thresholds(y.ticks(20))
-				.value((d) => d);
-
-			const bins = histogram(tokenData);
-
-			const maxNum = d3.max(bins, (d) => d.length);
-			const xNum = d3.scaleLinear().range([0, x.bandwidth()]).domain([-maxNum, maxNum]);
-
-			// Add the violin shape
-			svg
-				.append("path")
-				.datum(bins)
-				.style("stroke", "none")
-				.style("fill", "grey")
-				.attr(
-					"d",
-					d3
-						.area()
-						.x0(xNum(0))
-						.x1((d) => xNum(d.length))
-						.y((d) => y(d.x0))
-						.curve(d3.curveCatmullRom)
-				)
-				.attr("transform", `translate(${x(token)},0)`);
-
-			// Add the box plot
-			const q1 = d3.quantile(tokenData.sort(d3.ascending), 0.25);
-			const median = d3.quantile(tokenData.sort(d3.ascending), 0.5);
-			const q3 = d3.quantile(tokenData.sort(d3.ascending), 0.75);
-			const interQuantileRange = q3 - q1;
-			const min = Math.max(d3.min(tokenData), q1 - 1.5 * interQuantileRange);
-			const max = Math.min(d3.max(tokenData), q3 + 1.5 * interQuantileRange);
-
-			svg
-				.append("line")
-				.attr("x1", x(token) + x.bandwidth() / 2)
-				.attr("x2", x(token) + x.bandwidth() / 2)
-				.attr("y1", y(min))
-				.attr("y2", y(max))
-				.attr("stroke", "black");
-
-			svg
-				.append("rect")
-				.attr("x", x(token) + x.bandwidth() / 2 - 10)
-				.attr("y", y(q3))
-				.attr("height", y(q1) - y(q3))
-				.attr("width", 20)
-				.attr("stroke", "black")
-				.style("fill", "#69b3a2");
-
-			svg
-				.append("line")
-				.attr("x1", x(token) + x.bandwidth() / 2 - 10)
-				.attr("x2", x(token) + x.bandwidth() / 2 + 10)
-				.attr("y1", y(median))
-				.attr("y2", y(median))
-				.attr("stroke", "black");
-		});
+	$: if (options.type === 'ATTN' && Array.isArray(options.values)) {
+		scoredHeads = options.values.map((row, i) => ({
+			index: i,
+			row,
+			score: row.reduce((a, b) => a + b, 0),
+		})).sort((a, b) => b.score - a.score);
+		minHeadScore = Math.min(...scoredHeads.map(x => x.score));
+		maxHeadScore = Math.max(...scoredHeads.map(x => x.score));
 	}
 </script>
 
 <div>
-	<h3 class="my-color">Layer: {options.layer || "None selected"} | Token Type: {options.tokenType || "None selected"} | Shape: {JSON.stringify(getShape(options.values))}</h3>
-	<p><strong>Values:</strong> {JSON.stringify(options.values || "No values available")}</p>
-	<div id="violin-plot"></div>
+	<h3 class="my-color">
+		Layer: {options.layer || "None selected"} |
+		LayerType: {options.type || "None selected"} |
+		Token Type: {options.tokenType || "None selected"} |
+		Shape: {JSON.stringify(getShape(options.values))}
+	</h3>
+
+	<!-- FFN table -->
+	{#if options.type === 'FFN' && Array.isArray(options.values)}
+		<table class="nig-table">
+			<thead>
+				<tr>
+					<th></th>
+					<th>Neuron</th>
+					<th>NIG Value</th>
+					<th>Attention</th>
+				</tr>
+			</thead>
+			<tbody>
+				{#each sortedFFN as { index, val }}
+				<tr>
+					<td><div class="circle" style="background-color: {getColorScale(val, minFFN, maxFFN)}"></div></td>
+					<td>neuron#{index}</td>
+					<td>{formatValue(val)}</td>
+					<td>--</td>
+				</tr>
+				{/each}
+			</tbody>
+		</table>
+
+	<!-- ATTN table -->
+	{:else if options.type === 'ATTN' && Array.isArray(options.values)}
+		<table class="nig-table">
+			<thead>
+				<tr>
+					<th></th>
+					<th>Head</th>
+					{#each TOKEN_TYPES as tgt}
+						<th>{tgt}</th>
+					{/each}
+				</tr>
+			</thead>
+			<tbody>
+				{#each scoredHeads as head}
+				<tr>
+					<td><div class="circle" style="background-color: {getColorScale(head.score, minHeadScore, maxHeadScore)}"></div></td>
+					<td>head#{head.index}</td>
+					{#each head.row as val}
+					<td>{formatValue(val)}</td>
+					{/each}
+				</tr>
+				{/each}
+			</tbody>
+		</table>
+
+	<!-- Fallback: raw output -->
+	{:else}
+		<pre>{JSON.stringify(options.values || "No values available", null, 2)}</pre>
+	{/if}
 </div>
 
 <style>
 	.my-color {
 		color: seagreen;
+		margin-bottom: 0.5rem;
+	}
+	.nig-table {
+		width: 100%;
+		border-collapse: collapse;
+		margin-top: 1rem;
+	}
+	.nig-table th,
+	.nig-table td {
+		padding: 8px 6px;
+		border: 1px solid #ccc;
+		text-align: left;
+	}
+	.circle {
+		width: 16px;
+		height: 16px;
+		border-radius: 50%;
+		display: inline-block;
+		margin-right: 4px;
+		border: 1px solid #ccc; /* Add border for blank circles */
+	}
+	pre {
+		background-color: #f4f4f4;
+		padding: 10px;
+		border-radius: 5px;
+		overflow-x: auto;
 	}
 </style>
