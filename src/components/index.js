@@ -3,3 +3,5 @@ export * from './nig-model';
 export * from './architecture';
 export * from './better-number';
 export * from './better-text';
+export * from './pruner';
+export * from './violinplot';

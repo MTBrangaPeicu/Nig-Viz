@@ -113,13 +113,39 @@ def neuron_integrated_gradients(
     extractor.remove_hooks()
 
     if compute_error:
-        errors = dict()
-        for key in path_gradients.keys():
-           errors[key] = _get_ig_error(path_gradients[key], all_outputs[0][0], all_outputs[-1][-1], debug=False)
+        # Sum all path gradients across all layers to get total attribution
+        total_attribution = 0
+        for key, gradients in path_gradients.items():
+            if isinstance(gradients, torch.Tensor):
+                total_attribution += torch.sum(gradients).item()
+            elif isinstance(gradients, np.ndarray):
+                total_attribution += np.sum(gradients)
+        
+        # Use the same error computation as IG: compare total attribution to prediction difference
+        baseline_pred = all_outputs[0][0].item() if hasattr(all_outputs[0][0], 'item') else all_outputs[0][0]
+        final_pred = all_outputs[-1][-1].item() if hasattr(all_outputs[-1][-1], 'item') else all_outputs[-1][-1]
+        
+        print(f"NIG Error - Total attribution: {total_attribution}")
+        print(f"NIG Error - Baseline pred: {baseline_pred}, Final pred: {final_pred}")
+        
+        # Compute error percentage similar to IG
+        delta_prediction = final_pred - baseline_pred
+        if abs(delta_prediction) > 1e-7:  # Avoid division by zero
+            aggregated_error = 100 * (delta_prediction - total_attribution) / delta_prediction
+        else:
+            aggregated_error = 0.0
+        
+        print(f"NIG Error - Computed error: {aggregated_error}")
+        
+        # Convert to Python scalar if needed
+        if hasattr(aggregated_error, 'item'):
+            aggregated_error = aggregated_error.item()
+    else:
+        aggregated_error = None
             
     gc.collect()
     torch.cuda.empty_cache() 
-    return path_gradients, errors if compute_error else None           
+    return path_gradients, aggregated_error           
 
 def nig_predict(query, passage, num_reps, batch_size, baseline_function, progress_callback=None):
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -166,6 +192,7 @@ def nig_predict(query, passage, num_reps, batch_size, baseline_function, progres
         num_reps=num_reps,
         batch_size=batch_size,
         num_labels=num_labels,
+        compute_error=True,  # Enable error computation
         progress_callback=progress_callback,
     )
 

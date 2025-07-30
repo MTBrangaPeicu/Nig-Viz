@@ -71,26 +71,28 @@
 
 	<!-- FFN table -->
 	{#if options.type === 'FFN' && Array.isArray(options.values)}
-		<table class="nig-table">
-			<thead>
-				<tr>
-					<th></th>
-					<th>Neuron</th>
-					<th>NIG Value</th>
-					<th>Attention</th>
-				</tr>
-			</thead>
-			<tbody>
-				{#each sortedFFN as { index, val }}
-				<tr>
-					<td><div class="circle" style="background-color: {getColorScale(val, minFFN, maxFFN)}"></div></td>
-					<td>neuron#{index}</td>
-					<td>{formatValue(val)}</td>
-					<td>--</td>
-				</tr>
-				{/each}
-			</tbody>
-		</table>
+		<div class="ffn-table-container">
+			<table class="nig-table">
+				<thead>
+					<tr>
+						<th></th>
+						<th>Neuron</th>
+						<th>NIG Value</th>
+						<th>Activation</th>
+					</tr>
+				</thead>
+				<tbody>
+					{#each sortedFFN as { index, val }}
+					<tr>
+						<td><div class="circle" style="background-color: {getColorScale(val, minFFN, maxFFN)}"></div></td>
+						<td>neuron#{index}</td>
+						<td>{formatValue(val)}</td>
+						<td>--</td>
+					</tr>
+					{/each}
+				</tbody>
+			</table>
+		</div>
 
 	<!-- ATTN table -->
 	{:else if options.type === 'ATTN' && Array.isArray(options.values)}
@@ -100,7 +102,7 @@
 					<th></th>
 					<th>Head</th>
 					{#each TOKEN_TYPES as tgt}
-						<th>{tgt}</th>
+						<th>→ {tgt}</th>
 					{/each}
 				</tr>
 			</thead>
@@ -119,7 +121,15 @@
 
 	<!-- Fallback: raw output -->
 	{:else}
-		<pre>{JSON.stringify(options.values || "No values available", null, 2)}</pre>
+		{#if options.hasNigData && (options.values === undefined || options.values === null)}
+			<p style="color: #666; font-style: italic; margin-top: 1rem;">
+				Click on shapes to select layers and token types
+			</p>
+		{:else if !options.hasNigData}
+			<pre>No values available</pre>
+		{:else}
+			<pre>{JSON.stringify(options.values, null, 2)}</pre>
+		{/if}
 	{/if}
 </div>
 
@@ -152,5 +162,23 @@
 		padding: 10px;
 		border-radius: 5px;
 		overflow-x: auto;
+	}
+	.ffn-table-container {
+		max-height: 500px; /* Set a fixed height for the container */
+		overflow-y: auto; /* Enable vertical scrolling */
+		margin-top: 1rem;
+		border: 1px solid #ddd;
+		border-radius: 4px;
+	}
+	.ffn-table-container table {
+		width: 100%;
+		border-collapse: collapse;
+	}
+	.ffn-table-container thead {
+		position: sticky;
+		top: 0;
+		background-color: white;
+		z-index: 1;
+		box-shadow: 0 1px 0 rgba(0, 0, 0, 0.1);
 	}
 </style>

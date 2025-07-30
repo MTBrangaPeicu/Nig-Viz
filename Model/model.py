@@ -156,23 +156,16 @@ def handle_nig_prediction(doc):
         # Store full NIGs in memory
         full_nigs_memory[id] = {
             "nig": nig,
-            "error": error,
+            # "error": error,  # Commented out - error rates too high
             "sep_position": sep_position,
         }
 
         print("Full NIGs memory stored for ID:", id)
 
-        # Compute Subset A using aggregation logic
-        subset_a,subset_b = aggregate_nig(nig, sep_position)
+        # Compute detailed aggregation (subset B only)
+        subset_b = aggregate_nig(nig, sep_position)
 
-        # Debugging: Print the shape of subset_a
-        print("Subset A Keys:", subset_a.keys())
-        for key, value in subset_a.items():
-            if isinstance(value, np.ndarray):
-                print(f"Layer: {key}, Shape: {value.shape}")
-            else:
-                print(f"Layer: {key}, Value Type: {type(value)}")
-
+        # Debugging: Print the shape of subset_b
         print("Subset B Keys:", subset_b.keys())
         for key, value in subset_b.items():
             if isinstance(value, np.ndarray):
@@ -182,9 +175,8 @@ def handle_nig_prediction(doc):
 
         # Ensure proper formatting for frontend
         formatted_result = {
-            "subset_a": subset_a,  # for architecture visualization
-            "subset_b": subset_b,  # for detailed table view
-            "error": error,
+            "subset_b": subset_b,  # for detailed data and frontend counting
+            # "error": error,  # Commented out - error rates too high, keeping as NA
         }
 
         #print("[DEBUG] Subset B keys (about to send):", list(subset_b.keys()))

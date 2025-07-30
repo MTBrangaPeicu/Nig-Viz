@@ -1,8 +1,12 @@
 import torch
+import numpy as np
 
 def aggregate_nig(nig, sep_position, use_norm=False):
+    """
+    Simplified aggregation function that only returns detailed_agg (subset_b).
+    The frontend will handle threshold-based counting and filtering.
+    """
     detailed_agg = {}
-    arch_agg = {}
 
     for key, nig_tensor in nig.items():
         nig_tensor = torch.tensor(nig_tensor)
@@ -18,7 +22,6 @@ def aggregate_nig(nig, sep_position, use_norm=False):
 
         if len(nig_tensor.shape) == 3:  # ATTN: [12, T, T]
             full = []  # for Subset B: [12, 5, 5]
-            arch = torch.zeros(5, 5)  # for Subset A: [5, 5]
             for i, src_mask in enumerate(masks):
                 row = []
                 for j, tgt_mask in enumerate(masks):
@@ -28,15 +31,13 @@ def aggregate_nig(nig, sep_position, use_norm=False):
                     else:
                         agg = torch.norm(sub, p=2, dim=(1, 2)) if use_norm else torch.sum(sub, dim=(1, 2))
                     row.append(agg)  # List of [12]
-                    arch[i, j] = torch.mean(agg)  # Avg across 12 heads
+                        
                 full.append(torch.stack(row, dim=1))  # [12, 5]
             full_tensor = torch.stack(full, dim=1)  # [12, 5, 5]
             detailed_agg[key] = full_tensor.numpy()
-            arch_agg[key] = arch.numpy()
 
         elif len(nig_tensor.shape) == 2:  # FFN: [T, 1536]
             rows = []
-            arch_vals = []
             for mask in masks:
                 masked = nig_tensor[mask, :]
                 if masked.numel() == 0:
@@ -44,8 +45,7 @@ def aggregate_nig(nig, sep_position, use_norm=False):
                 else:
                     agg = torch.norm(masked, p=2, dim=0) if use_norm else torch.sum(masked, dim=0)
                 rows.append(agg)  # [1536]
-                arch_vals.append(torch.sum(agg))  # scalar
+                    
             detailed_agg[key] = torch.stack(rows, dim=0).numpy()  # [5, 1536]
-            arch_agg[key] = torch.tensor(arch_vals).numpy()  # [5]
 
-    return arch_agg, detailed_agg
+    return detailed_agg

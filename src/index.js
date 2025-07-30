@@ -4,7 +4,7 @@ import '@marcellejs/layouts/dist/marcelle-layouts.css';
 import * as core from '@marcellejs/core';
 import * as widgets from '@marcellejs/gui-widgets';
 import { dashboard } from '@marcellejs/layouts';
-import { nigtable, nigModel, architecture, betterNumber, betterText} from './components';
+import { nigtable, nigModel, architecture, betterNumber, betterText, pruner, violinplot} from './components';
 import { progressBar, slider } from '@marcellejs/gui-widgets';
 import { map } from 'rxjs';
 
@@ -42,6 +42,7 @@ datasetService.on('patched', (doc) => {
 datasetService.create({ n: 10 });
 
 let selectedQueryId = null; // Store the selected query ID
+let currentNigId = null; // Store the current NIG result ID for threshold updates
 
 // Handle query selection
 queryInput.$value.subscribe((selectedQuery) => {
@@ -86,10 +87,17 @@ numRepsInput.title = 'Number of Repetitions';
 const tableNIGS = nigtable();
 tableNIGS.title = 'NIG values';
 
+const violinPlotComponent = violinplot();
+violinPlotComponent.title = 'NIG Distribution (Violin Plot)';
+
+const architectureComponent = architecture();
+architectureComponent.title = 'Architecture Grid';
+
 // Use relevant models for progress bars
 const progIG = progressBar(igModelInstance.$status.pipe(map(x => ({ ...x, message: x.status }))));
 const progNIG = progressBar(nigModelInstance.$status.pipe(map(x => ({ ...x, message: x.status }))));
 progNIG.title = '';
+progIG.title = '';
 
 const layerDropdown = widgets.select(['Loading...']);
 layerDropdown.title = 'Select Layer';
@@ -167,26 +175,29 @@ nigModelInstance.$data.subscribe(doc => {
     return;
   }
 
+  // Store the current NIG result ID for threshold updates
+  currentNigId = doc._id;
+
   if (doc.result.subset_b) {
     const nig = doc.result.subset_b;
+    // const error = doc.result.error;
     const layers = Object.keys(nig);
 
     // Update dropdown options and value
     layerDropdown.$options.next(layers.length > 0 ? layers : ['No layers available']);
     layerDropdown.$value.next(layers.length > 0 ? layers[0] : 'No layers available');
 
-    // Update table for first layer
+    // Update table for first layer - but don't show data initially, just indicate that NIG data exists
     if (layers.length > 0) {
       tableNIGS.$options.next({
-        layer: layers[0],
-        values: nig[layers[0]],
+        hasNigData: true, // Flag to indicate NIG data is available
+        layer: null, // No specific layer selected yet
+        values: null, // No values to show initially
       });
     }
-  }
 
-  if (doc.result.subset_a) {
-    // Feed subset_a into the architecture component for edge visualization
-    architectureComponent.updateEdges(doc.result.subset_a);
+    // Feed subset_b into the architecture component for counting/visualization
+    architectureComponent.updateEdges(nig); // Removed error parameter
   }
 }); 
 
@@ -206,8 +217,6 @@ layerDropdown.$value.subscribe(layer => {
   }
 });
 
-const architectureComponent = architecture();
-architectureComponent.title = 'Architecture Grid';
 const thresholdSlider = slider({
   values: [0.05], 
   min: 0,
@@ -236,24 +245,31 @@ architectureComponent.$selection.subscribe(({ layer, type, tokenType }) => {
 		if (tokenIndex !== -1) {
       if (type === 'ATTN' && Array.isArray(layerData) && Array.isArray(layerData[0]) && Array.isArray(layerData[0][0])) {
         // layerData: (12, 5, 5) => attention from tokenIndex to all others
-        const values = layerData.map(head => head[tokenIndex]); // shape (12, 5)
+        const values = layerData.map(head => head.map(row => row[tokenIndex])); // shape (12, 5)
         tableNIGS.$options.next({
+          hasNigData: true,
           layer: layerKey,
           type,
           tokenType,
           values,
         });
+        violinPlotComponent.$options.next({ layer: layerKey, type, tokenType, values: layerData});
       } else if (type === 'FFN' && Array.isArray(layerData) && Array.isArray(layerData[tokenIndex])) {
         // layerData: (5, 1536) => FFN activation per token type
         tableNIGS.$options.next({
+          hasNigData: true,
           layer: layerKey,
           type,
           tokenType,
           values: layerData[tokenIndex],
         });
+        violinPlotComponent.$options.next({ layer: layerKey, type, tokenType,values: layerData });
       } else {
         console.log("Error: Invalid token type or malformed data structure");
-        tableNIGS.$options.next({ error: 'Invalid token type or data' });
+        tableNIGS.$options.next({ 
+          hasNigData: true,
+          error: 'Invalid token type or data' 
+        });
       }
     }
 	}
@@ -267,13 +283,17 @@ layerDropdown.$value.subscribe(layer => {
 	const nig = doc && doc.result && doc.result.subset_b;
 	if (nig && nig[layer]) {
 		tableNIGS.$options.next({
+			hasNigData: true,
 			layer,
 			type: null, // No layer type for dropdown
 			tokenType: null, // No token type for dropdown
 			values: nig[layer],
 		});
 	} else if (nig) {
-		tableNIGS.$options.next({ error: 'Invalid layer or no data' });
+		tableNIGS.$options.next({ 
+			hasNigData: true,
+			error: 'Invalid layer or no data' 
+		});
 	}
 });
 
@@ -301,13 +321,44 @@ forwardPassModelInstance.$data.subscribe(doc => {
   }
 
   if (doc.result) {
-    const { logits, probabilities, label, error } = doc.result;
-    forwardPassOutput.$value.next(
-      `Logits: ${JSON.stringify(logits)}\nProbabilities: ${JSON.stringify(probabilities)}\nLabel: ${label}\nError: ${error}`
-    );
+    const { logits, probabilities, label } = doc.result;
+    
+    // Extract the actual values (they come as nested arrays)
+    const logitValue = Array.isArray(logits) && Array.isArray(logits[0]) ? logits[0][0] : logits;
+    const probValue = Array.isArray(probabilities) && Array.isArray(probabilities[0]) ? probabilities[0][0] : probabilities;
+    
+    // Format probability as percentage
+    const confidence = (probValue * 100).toFixed(1);
+    
+    // Determine relevance description
+    const relevance = label === 1 ? 'RELEVANT' : 'NOT RELEVANT';
+    
+    // For interpretation, use the actual confidence in the prediction
+    const interpretationConfidence = label === 1 ? confidence : (100 - parseFloat(confidence)).toFixed(1);
+    
+    const output = [
+      `Classification: ${relevance}`,
+      `Confidence: ${interpretationConfidence}%`,
+      ``,
+      `Raw Logit: ${logitValue.toFixed(4)}`,
+      `Probability: ${probValue.toFixed(4)}`,
+      `Binary Label: ${label}`
+    ].join('<br>');
+    
+    forwardPassOutput.$value.next(output);
   } else if (doc.status === 'error') {
-    forwardPassOutput.$value.next(`Error: ${doc.error}`);
+    forwardPassOutput.$value.next(`ERROR\n=====\n${doc.error}`);
   }
+});
+
+const prunerComponent = pruner({
+  title: 'Pruner',
+  options: {
+    enabled: false,
+    globalThreshold: 0.1,
+    pruningRules: [],
+    pruningTargets: [],
+  },
 });
 
 // Dashboard
@@ -319,7 +370,9 @@ const dash = dashboard({
 dash.page('Query Review')
   .use([queryInput, passageInput],[numRepsInput, baselineDropdown, submitQuery], progIG, [outputText]);
 
+//layerDropdown
 dash.page('NIG values')
-  .use([queryInput, passageInput],[numRepsInput, baselineDropdown, submitNIG], progNIG, [submitForwardPass, forwardPassOutput], [thresholdSlider, layerDropdown], [architectureComponent, tableNIGS]);
+  .use([queryInput, passageInput],[numRepsInput, baselineDropdown], progNIG, [thresholdSlider,submitNIG] ,[architectureComponent, tableNIGS], violinPlotComponent)
+  .sidebar( submitForwardPass, forwardPassOutput, prunerComponent);
 
 dash.show();
