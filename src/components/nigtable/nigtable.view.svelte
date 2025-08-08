@@ -1,14 +1,81 @@
 <script>
 	export let options$;
+	export let pruningState$;
 	let options = {};
+	let pruningState = { enabled: false, rules: [], targets: [], thresholds: {} };
 
 	options$.subscribe(value => {
 		options = value;
 	});
 
+	pruningState$.subscribe(value => {
+		pruningState = value;
+		if (value.targets && value.targets.length > 0) {
+			console.log('Nigtable received pruning targets:', value.targets);
+		}
+	});
+
 	const TOKEN_TYPES = ['cls', 'qry', 'sep1', 'doc', 'sep2'];
 
-	function getShape(values) {
+	// Function to check if a neuron/head should be red based on pruning targets OR threshold-based pruning
+	function shouldCircleBeRed(index, layerType) {
+		if (!pruningState.enabled || !options.layer) return false;
+		
+		// Extract layer number from options.layer (e.g., "bert.encoder.layer.0.attention" -> "L0_ATTN")
+		const layerMatch = options.layer.match(/layer\.(\d+)\.(attention|intermediate)/);
+		if (!layerMatch) return false;
+		
+		const layerNum = layerMatch[1];
+		const type = layerMatch[2] === 'attention' ? 'ATTN' : 'FFN';
+		const layerKey = `L${layerNum}_${type}`;
+		
+		// Check 1: Is this specific neuron/head explicitly selected in pruning targets?
+		// Targets should be specific to layer, neuron/head, AND token type
+		// Convert both to numbers to avoid string/number mismatch
+		const isExplicitlyTargeted = pruningState.targets.some(target => 
+			target.layer === layerKey && 
+			parseInt(target.neuron) === parseInt(index) &&
+			target.tokenType === options.tokenType
+		);
+		
+		if (isExplicitlyTargeted) {
+			console.log(`Neuron ${index} is explicitly targeted in layer ${layerKey} for token ${options.tokenType}`);
+			return true;
+		}
+		
+		// Check 2: Is there a pruning rule that applies to this neuron/head?
+		const isRuleApplied = pruningState.rules.some(rule => {
+			// Rule must match the layer
+			if (rule.layer !== layerKey) return false;
+			
+			// If rule is for "all" token types, it applies regardless of current token selection
+			if (rule.tokenType === 'all') return true;
+			
+			// If rule is for specific token type, it must match the current token selection
+			return rule.tokenType === options.tokenType;
+		});
+		
+		if (isRuleApplied) return true;
+		
+		// Check 3: Would this neuron/head be pruned based on threshold?
+		if (options.pruningCutoffs) {
+			if (layerType === 'FFN' && pruningState.thresholds.ffn > 0 && Array.isArray(options.values)) {
+				// For FFN: check if this neuron's value would be pruned based on threshold
+				const neuronValue = Math.abs(options.values[index]);
+				return neuronValue >= options.pruningCutoffs.ffn;
+			}
+			
+			if (layerType === 'ATTN' && pruningState.thresholds.attention > 0 && Array.isArray(options.values)) {
+				// For ATTN: check if any of this head's values would be pruned based on threshold  
+				const headValues = options.values[index];
+				if (Array.isArray(headValues)) {
+					return headValues.some(val => Math.abs(val) >= options.pruningCutoffs.attention);
+				}
+			}
+		}
+		
+		return false;
+	}	function getShape(values) {
 		if (Array.isArray(values)) {
 			if (Array.isArray(values[0])) {
 				if (Array.isArray(values[0][0])) {
@@ -43,6 +110,8 @@
 			.sort((a, b) => b.val - a.val);
 		minFFN = Math.min(...sortedFFN.map(x => x.val));
 		maxFFN = Math.max(...sortedFFN.map(x => x.val));
+		console.log(`FFN table updated with ${sortedFFN.length} neurons`);
+		console.log('Current pruning state:', pruningState);
 	}
 
 	// ATTN-specific calculations
@@ -84,7 +153,7 @@
 				<tbody>
 					{#each sortedFFN as { index, val }}
 					<tr>
-						<td><div class="circle" style="background-color: {getColorScale(val, minFFN, maxFFN)}"></div></td>
+						<td><div class="circle" style="background-color: {shouldCircleBeRed(index, 'FFN') ? 'darkred' : getColorScale(val, minFFN, maxFFN)}"></div></td>
 						<td>neuron#{index}</td>
 						<td>{formatValue(val)}</td>
 						<td>--</td>
@@ -109,7 +178,7 @@
 			<tbody>
 				{#each scoredHeads as head}
 				<tr>
-					<td><div class="circle" style="background-color: {getColorScale(head.score, minHeadScore, maxHeadScore)}"></div></td>
+					<td><div class="circle" style="background-color: {shouldCircleBeRed(head.index, 'ATTN') ? 'darkred' : getColorScale(head.score, minHeadScore, maxHeadScore)}"></div></td>
 					<td>head#{head.index}</td>
 					{#each head.row as val}
 					<td>{formatValue(val)}</td>

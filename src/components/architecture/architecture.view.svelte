@@ -8,6 +8,7 @@
 	export let selection$;
 	export let threshold$;
 	export let edges$;
+	export let pruningState$;
 	//export let error$;
 
 
@@ -18,6 +19,56 @@
 	let svg;
 	let edgesGroup;
 	let errorSub; // Declare errorSub variable
+	let nodePruningState = { enabled: false, rules: [], targets: [], thresholds: {} };
+
+	// Subscribe to pruning state changes for node coloring
+	pruningState$.subscribe(state => {
+		nodePruningState = state;
+		// Redraw the grid when pruning state changes
+		if (svg) {
+			updateNodeColors();
+		}
+	});
+
+	// Function to check if a node should be red based on pruning rules
+	function shouldNodeBeRed(layer, type, tokenType) {
+		if (!nodePruningState.enabled) return false;
+
+		const layerKey = `L${layer}_${type}`;
+		
+		// Check if "all" is selected for this specific layer
+		if (nodePruningState.rules.some(rule => rule.layer === layerKey && rule.tokenType === 'all')) {
+			return true; // Highlight all token types in this specific layer
+		}
+
+		// Check pruning rules for specific layer/token matches
+		return nodePruningState.rules.some(rule => 
+			rule.layer === layerKey && rule.tokenType === tokenType
+		);
+	}
+
+	// Function to update node colors based on pruning state
+	function updateNodeColors() {
+		// Update circles (ATTN nodes)
+		svg.selectAll(".attn-circle")
+			.attr("fill", function(d, i) {
+				const layerIndex = parseInt(this.getAttribute('data-layer'));
+				const tokenIndex = parseInt(this.getAttribute('data-token'));
+				const tokenTypes = ['cls', 'qry', 'sep1', 'doc', 'sep2'];
+				const tokenType = tokenTypes[tokenIndex];
+				return shouldNodeBeRed(layerIndex, 'ATTN', tokenType) ? 'darkred' : 'gray';
+			});
+
+		// Update squares (FFN nodes)
+		svg.selectAll(".ffn-square")
+			.attr("fill", function(d, i) {
+				const layerIndex = parseInt(this.getAttribute('data-layer'));
+				const tokenIndex = parseInt(this.getAttribute('data-token'));
+				const tokenTypes = ['cls', 'qry', 'sep1', 'doc', 'sep2'];
+				const tokenType = tokenTypes[tokenIndex];
+				return shouldNodeBeRed(layerIndex, 'FFN', tokenType) ? 'darkred' : 'darkgray';
+			});
+	}
 
 	// Handle click events for FFN and ATTN layers
 	function handleClick(layer, type, tokenType) {
@@ -25,12 +76,13 @@
 		selection$.next({ layer, type, tokenType });
 	}
 
-	function drawEdges(edges, threshold) {
+	function drawEdges(edges, globalThreshold, currentPruningState) {
 		if (!edgesGroup) {
 			console.error("Edges group is not defined. Ensure onMount has initialized the SVG element.");
 			return;
 		}
 
+		// Clear all existing edges first
 		edgesGroup.selectAll(".edge-line").remove();
 
 		// Create a scale for edge thickness based on proportion (0 to 1)
@@ -41,7 +93,7 @@
 		const numLayers = 24;
 		const barY = margin.top + 24; // bar is now below the text
 
-		edges.forEach(({ x1, y1, x2, y2, nigValue, layer, count, total, srcToken, tgtToken, globalCutoff }) => {
+		edges.forEach(({ x1, y1, x2, y2, nigValue, layer, count, total, srcToken, tgtToken, globalCutoff, shouldBeRed }) => {
 			const x1Pos = margin.left + x1 * gridSize + gridSize / 2;
 			let y1Pos = margin.top + y1 * gridSize + gridSize / 2 + yShift;
 			const x2Pos = margin.left + x2 * gridSize + gridSize / 2;
@@ -54,12 +106,15 @@
 
 			// Only draw edge if proportion > 0
 			if (nigValue > 0) {
+				// Determine edge color based on precomputed pruning status
+				const edgeColor = shouldBeRed ? 'darkred' : 'black';
+				
 				const line = edgesGroup.append("line")
 					.attr("x1", x1Pos)
 					.attr("y1", y1Pos)
 					.attr("x2", x2Pos)
 					.attr("y2", y2Pos)
-					.attr("stroke", "black")
+					.attr("stroke", edgeColor)
 					.attr("stroke-width", thicknessScale(nigValue)) // Use proportion for thickness
 					.attr("stroke-opacity", 0.8)
 					.attr("stroke-linecap", "round")
@@ -74,16 +129,23 @@
 				})();
 				
 				// Determine if this is ATTN or FFN
-				const componentType = layer?.includes('attention') ? 'ATTN' : 'FFN';
+				const tooltipComponentType = layer?.includes('attention') ? 'ATTN' : 'FFN';
 				
 				// Enhanced tooltip with count and layer information
-				line.append("title").text(
-					`Layer ${layerNum} ${componentType}\n` +
+				let tooltipText = `Layer ${layerNum} ${tooltipComponentType}\n` +
 					`${srcToken} → ${tgtToken}\n` +
 					`Count: ${count}/${total} (${(nigValue * 100).toFixed(1)}%)\n` +
-					`Global threshold: ${(threshold * 100).toFixed(1)}%\n` +
-					`Global cutoff: ${globalCutoff ? globalCutoff.toFixed(6) : 'N/A'}`
-				);
+					`Global threshold: ${(globalThreshold * 100).toFixed(1)}%\n` +
+					`Global cutoff: ${globalCutoff ? globalCutoff.toFixed(6) : 'N/A'}`;
+				
+				// Add pruning information if enabled
+				if (currentPruningState.enabled) {
+					const pruningThreshold = tooltipComponentType === 'ATTN' ? currentPruningState.thresholds.attention : currentPruningState.thresholds.ffn;
+					tooltipText += `\nPruning threshold: ${(pruningThreshold * 100).toFixed(1)}%`;
+					tooltipText += `\nWould be pruned: ${shouldBeRed ? 'Yes' : 'No'}`;
+				}
+				
+				line.append("title").text(tooltipText);
 			}
 		});
 	}
@@ -146,11 +208,18 @@
 			.attr("class", "top-bar");
 
 
-		const sub = combineLatest([edges$, threshold$]).subscribe(
-		([edges, threshold]) => {
+		const sub = combineLatest([edges$, threshold$, pruningState$]).subscribe(
+		([edges, threshold, pruningState]) => {
+			console.log(`VIEW SUBSCRIPTION UPDATE:`);
+			console.log(`  Edges received: ${edges ? edges.length : 'null'}`);
+			console.log(`  Threshold: ${threshold}`);
+			console.log(`  Pruning enabled: ${pruningState?.enabled}`);
+			
 			if (edges && edges.length > 0) {
-				drawEdges(edges, threshold);
+				console.log(`  Drawing ${edges.length} edges`);
+				drawEdges(edges, threshold, pruningState);
 			} else {
+				console.log(`  Clearing edges (edges: ${edges ? edges.length : 'null'})`);
 				// Clear edges if no data
 				if (edgesGroup) {
 					edgesGroup.selectAll(".edge-line").remove();
@@ -181,6 +250,8 @@
 						.attr("stroke-opacity", 0.8)
 						.attr("stroke-width", 3)
 						.attr("class", "attn-circle")
+						.attr("data-layer", Math.floor(layer / 2))
+						.attr("data-token", tokenIndex)
 						.style("cursor", "pointer")
 						.on("mouseover", function () {
 							d3.select(this)
@@ -207,6 +278,8 @@
 						.attr("stroke", "white")
 						.attr("stroke-width", 3)
 						.attr("class", "ffn-square")
+						.attr("data-layer", Math.floor(layer / 2))
+						.attr("data-token", tokenIndex)
 						.style("cursor", "pointer")
 						.each(function () {
 							const rect = d3.select(this);

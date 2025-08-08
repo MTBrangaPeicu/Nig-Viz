@@ -5,7 +5,6 @@ import * as core from '@marcellejs/core';
 import * as widgets from '@marcellejs/gui-widgets';
 import { dashboard } from '@marcellejs/layouts';
 import { nigtable, nigModel, architecture, betterNumber, betterText, pruner, violinplot} from './components';
-import { progressBar, slider } from '@marcellejs/gui-widgets';
 import { map } from 'rxjs';
 
 const store = core.dataStore('http://localhost:3030');
@@ -94,8 +93,8 @@ const architectureComponent = architecture();
 architectureComponent.title = 'Architecture Grid';
 
 // Use relevant models for progress bars
-const progIG = progressBar(igModelInstance.$status.pipe(map(x => ({ ...x, message: x.status }))));
-const progNIG = progressBar(nigModelInstance.$status.pipe(map(x => ({ ...x, message: x.status }))));
+const progIG = widgets.progressBar(igModelInstance.$status.pipe(map(x => ({ ...x, message: x.status }))));
+const progNIG = widgets.progressBar(nigModelInstance.$status.pipe(map(x => ({ ...x, message: x.status }))));
 progNIG.title = '';
 progIG.title = '';
 
@@ -217,7 +216,7 @@ layerDropdown.$value.subscribe(layer => {
   }
 });
 
-const thresholdSlider = slider({
+const thresholdSlider = widgets.slider({
   values: [0.05], 
   min: 0,
   max: 1,
@@ -239,6 +238,9 @@ architectureComponent.$selection.subscribe(({ layer, type, tokenType }) => {
 	const layerKey = `bert.encoder.layer.${layer}.${type === 'FFN' ? 'intermediate.dense' : 'attention.self.attention_probs'}`; 
 	console.log("Constructed Layer Key:", layerKey);
 
+	// Get current pruning cutoffs from architecture component
+	const pruningCutoffs = architectureComponent.pruningCutoffs$.getValue();
+
 	if (nig && nig[layerKey]) {
     const layerData = nig[layerKey];
 		const tokenIndex = ['cls', 'qry', 'sep1', 'doc', 'sep2'].indexOf(tokenType); // Map tokenType to index
@@ -252,6 +254,7 @@ architectureComponent.$selection.subscribe(({ layer, type, tokenType }) => {
           type,
           tokenType,
           values,
+          pruningCutoffs, // Pass pruning cutoffs to nigtable
         });
         violinPlotComponent.$options.next({ layer: layerKey, type, tokenType, values: layerData});
       } else if (type === 'FFN' && Array.isArray(layerData) && Array.isArray(layerData[tokenIndex])) {
@@ -262,6 +265,7 @@ architectureComponent.$selection.subscribe(({ layer, type, tokenType }) => {
           type,
           tokenType,
           values: layerData[tokenIndex],
+          pruningCutoffs, // Pass pruning cutoffs to nigtable
         });
         violinPlotComponent.$options.next({ layer: layerKey, type, tokenType,values: layerData });
       } else {
@@ -305,11 +309,71 @@ submitForwardPass.title = 'Forward Pass';
 const forwardPassOutput = widgets.text('Results will appear here');
 forwardPassOutput.title = 'Forward Pass Output';
 
+const submitPrunedForwardPass = widgets.button('Run Pruned Forward Pass');
+submitPrunedForwardPass.title = 'Pruned Forward Pass';
+const prunedForwardPassOutput = widgets.text('Results will appear here');
+prunedForwardPassOutput.title = 'Pruned Forward Pass Output';
+
 // Forward Pass submit
 submitForwardPass.$click.subscribe(() => {
   forwardPassModelInstance.predict({
     query: queryInput.$value.getValue(),
     passage: passageInput.$value.getValue(),
+  });
+});
+
+// Pruned Forward Pass submit
+submitPrunedForwardPass.$click.subscribe(() => {
+  // Check if NIG data is available (we'll rely on backend memory)
+  const doc = nigModelInstance.$data.getValue();
+  console.log("NIG data check:", doc);
+  
+  if (!doc || !doc.result || !doc.result.subset_b) {
+    prunedForwardPassOutput.$value.next('Error: No NIG data available. Please run NIG values calculation first.');
+    return;
+  }
+
+  // Get current pruner settings
+  const prunerOptions = prunerComponent.$options.getValue();
+  console.log("Pruner options for request:", prunerOptions);
+
+  // Extract pruning thresholds from pruner component
+  let attentionThreshold = 0.0; // Default to no pruning when disabled
+  let ffnThreshold = 0.0;
+
+  if (prunerOptions && prunerOptions.enabled) {
+    // Use individual thresholds when pruning is enabled
+    attentionThreshold = prunerOptions.attentionThreshold || 0.0;
+    ffnThreshold = prunerOptions.ffnThreshold || 0.0;
+
+    // Override with specific rules if they exist
+    if (prunerOptions.pruningRules && prunerOptions.pruningRules.length > 0) {
+      prunerOptions.pruningRules.forEach(rule => {
+        if (rule.target === 'attention' && rule.threshold !== undefined) {
+          attentionThreshold = rule.threshold;
+        } else if (rule.target === 'ffn' && rule.threshold !== undefined) {
+          ffnThreshold = rule.threshold;
+        }
+      });
+    }
+  }
+  // When pruning is disabled (enabled = false), thresholds remain 0.0 (no pruning)
+
+  console.log("Sending pruned forward pass request with thresholds:", {
+    attention: attentionThreshold,
+    ffn: ffnThreshold
+  });
+  
+  prunedForwardPassModelInstance.predict({
+    query: queryInput.$value.getValue(),
+    passage: passageInput.$value.getValue(),
+    pruning_percentage_attention: attentionThreshold,
+    pruning_percentage_ffn: ffnThreshold,
+    // NEW: Include pruning rules and targets from the pruner component
+    pruning_enabled: prunerOptions ? prunerOptions.enabled : false,
+    pruning_rules: prunerOptions ? (prunerOptions.pruningRules || []) : [],
+    pruning_targets: prunerOptions ? (prunerOptions.pruningTargets || []) : [],
+    // Note: No longer sending nig_data - backend uses raw data from memory
   });
 });
 
@@ -351,14 +415,88 @@ forwardPassModelInstance.$data.subscribe(doc => {
   }
 });
 
+// Create pruned forward pass model instance
+const prunedForwardPassModelInstance = nigModel(store, 'pruned-forward-pass');
+
+// Handle Pruned Forward Pass results
+prunedForwardPassModelInstance.$data.subscribe(doc => {
+  console.log("Received pruned forward pass data:", doc);
+  
+  if (!doc || !doc.result) {
+    prunedForwardPassOutput.$value.next('No result received.');
+    return;
+  }
+
+  if (doc.result) {
+    const { logits, probabilities, label } = doc.result;
+    
+    // Extract the actual values (they come as nested arrays)
+    const logitValue = Array.isArray(logits) && Array.isArray(logits[0]) ? logits[0][0] : logits;
+    const probValue = Array.isArray(probabilities) && Array.isArray(probabilities[0]) ? probabilities[0][0] : probabilities;
+    
+    // Format probability as percentage
+    const confidence = (probValue * 100).toFixed(1);
+    
+    // Determine relevance description
+    const relevance = label === 1 ? 'RELEVANT' : 'NOT RELEVANT';
+    
+    // For interpretation, use the actual confidence in the prediction
+    const interpretationConfidence = label === 1 ? confidence : (100 - parseFloat(confidence)).toFixed(1);
+    
+    const output = [
+      `[PRUNED MODEL]`,
+      `Classification: ${relevance}`,
+      `Confidence: ${interpretationConfidence}%`,
+      ``,
+      `Raw Logit: ${logitValue.toFixed(4)}`,
+      `Probability: ${probValue.toFixed(4)}`,
+      `Binary Label: ${label}`
+    ].join('<br>');
+    
+    prunedForwardPassOutput.$value.next(output);
+  } else if (doc.status === 'error') {
+    prunedForwardPassOutput.$value.next(`ERROR\n=====\n${doc.error}`);
+  }
+});
+
 const prunerComponent = pruner({
   title: 'Pruner',
   options: {
     enabled: false,
-    globalThreshold: 0.1,
+    attentionThreshold: 0.0,
+    ffnThreshold: 0.0,
     pruningRules: [],
     pruningTargets: [],
   },
+});
+
+// Subscribe to pruner component changes for debugging and updating other components
+prunerComponent.$options.subscribe((options) => {
+  console.log('Pruner options updated:', options);
+  
+  // Update architecture component with pruning state
+  architectureComponent.updatePruningState(options);
+  
+  // Update NIG table component with pruning state
+  tableNIGS.updatePruningState(options);
+  
+  // Use a small timeout to ensure architecture component has finished calculating cutoffs
+  setTimeout(() => {
+    // If there's currently a layer selected in the nigtable, refresh it with updated pruning cutoffs
+    const currentNigtableOptions = tableNIGS.$options.getValue();
+    if (currentNigtableOptions && currentNigtableOptions.layer && currentNigtableOptions.type) {
+      // Get the latest pruning cutoffs from architecture component
+      const pruningCutoffs = architectureComponent.pruningCutoffs$.getValue();
+      
+      // Update the nigtable with the same data but new pruning cutoffs
+      tableNIGS.$options.next({
+        ...currentNigtableOptions,
+        pruningCutoffs: pruningCutoffs
+      });
+      
+      console.log('Refreshed nigtable with updated pruning cutoffs:', pruningCutoffs);
+    }
+  }, 10); // Small delay to let architecture component finish
 });
 
 // Dashboard
@@ -373,6 +511,6 @@ dash.page('Query Review')
 //layerDropdown
 dash.page('NIG values')
   .use([queryInput, passageInput],[numRepsInput, baselineDropdown], progNIG, [thresholdSlider,submitNIG] ,[architectureComponent, tableNIGS], violinPlotComponent)
-  .sidebar( submitForwardPass, forwardPassOutput, prunerComponent);
+  .sidebar( submitForwardPass, forwardPassOutput, submitPrunedForwardPass, prunedForwardPassOutput, prunerComponent);
 
 dash.show();

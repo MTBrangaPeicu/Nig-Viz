@@ -6,6 +6,8 @@ import random
 from integrated_gradients import predict
 from neuron_integrated_gradients import nig_predict
 from aggregation import aggregate_nig  # Import aggregation logic
+from prune import get_masks
+from pruned_forward import pruned_forward
 from utils import (
     generate_baseline_with_only_padded_tokens,
     generate_baseline_with_padded_query_and_passage_but_special_tokens,
@@ -20,6 +22,7 @@ ig_service = store.service("predictions")
 nig_service = store.service("nig-values")
 dataset_service = store.service("msmarco-samples")
 forward_service = store.service("forward-pass")
+pruned_forward_service = store.service("pruned-forward-pass")
 
 # Initialize the MS MARCO development dataset
 print("Initializing MS MARCO development dataset from Hugging Face...")
@@ -209,7 +212,7 @@ def handle_forward_pass_request(doc):
             passage,
             max_length=512,
             truncation=True,
-            padding=True,
+            padding=True,  # Use dynamic padding for consistency
             return_attention_mask=True,
             return_tensors="pt"
         ).to(device)
@@ -232,11 +235,125 @@ def handle_forward_pass_request(doc):
             "error": str(e)
         })
 
+def handle_pruned_forward_pass_request(doc):
+    try:
+        print(f"Received pruned forward pass request: {doc}")
+        
+        query = doc.get("query")
+        passage = doc.get("passage")
+        pruning_percentage_attention = doc.get("pruning_percentage_attention", 0.01)
+        pruning_percentage_ffn = doc.get("pruning_percentage_ffn", 0.01)
+        
+        # NEW: Get pruning rules and targets from the frontend
+        pruning_rules = doc.get("pruning_rules", [])
+        pruning_targets = doc.get("pruning_targets", [])
+        pruning_enabled = doc.get("pruning_enabled", False)
+        
+        print(f"Query: {query}")
+        print(f"Passage: {passage}")
+        print(f"Pruning enabled: {pruning_enabled}")
+        print(f"Pruning rules: {pruning_rules}")
+        print(f"Pruning targets: {pruning_targets}")
+        
+        if not query or not passage:
+            pruned_forward_service.patch(doc["_id"], {
+                "status": "error",
+                "error": "Missing query or passage"
+            })
+            return
+
+        # Get the most recent NIG data from memory
+        if not full_nigs_memory:
+            pruned_forward_service.patch(doc["_id"], {
+                "status": "error", 
+                "error": "No NIG data available. Please run NIG values calculation first."
+            })
+            return
+        
+        # Get the most recent NIG data (for now, use the last entry)
+        # In production, you might want to match by query/passage or use a better strategy
+        latest_nig_id = max(full_nigs_memory.keys())
+        nig_memory_data = full_nigs_memory[latest_nig_id]
+        raw_nig_data = nig_memory_data["nig"]
+        sep_position = nig_memory_data["sep_position"]
+
+        print("Generating pruning masks...")
+        # Generate pruning masks using your original NIG data PLUS rules and targets
+        top_neurons = get_masks(
+            raw_nig_data, 
+            pruning_percentage_attention, 
+            pruning_percentage_ffn,
+            pruning_rules=pruning_rules if pruning_enabled else [],
+            pruning_targets=pruning_targets if pruning_enabled else [],
+            sep_position=sep_position
+        )
+        print(f"Generated masks for {len(top_neurons)} layers")
+
+        # Prepare inputs for the model - use same padding as NIG calculation
+        inputs = tokenizer(
+            query,
+            passage,
+            max_length=512,
+            truncation=True,
+            padding=True,  # Use dynamic padding to match NIG calculation
+            return_attention_mask=True,
+            return_tensors="pt"
+        ).to(device)
+
+        # Get the actual sequence length (excluding padding)
+        actual_length = inputs["attention_mask"].sum().item()
+        print(f"Actual sequence length: {actual_length}")
+
+        # Run pruned forward pass
+        print("Running pruned forward pass...")
+        try:
+            pruned_score = pruned_forward(
+                model=model,
+                tokenizer=tokenizer,
+                inputs=inputs,
+                neurons_to_prune=top_neurons,
+                input_length=actual_length  # Use actual sequence length
+            )
+            print(f"Pruned forward pass completed, score: {pruned_score}")
+        except Exception as e:
+            print(f"Error in pruned forward pass: {e}")
+            raise e
+
+        # Convert to same format as regular forward pass
+        print(f"Pruned score type: {type(pruned_score)}, value: {pruned_score}")
+        
+        # Convert score to logit-like format and create response
+        # Since pruned_forward returns a probability, convert back to logit format
+        import math
+        if pruned_score >= 1.0:
+            pruned_score = 0.9999  # Avoid log(0)
+        elif pruned_score <= 0.0:
+            pruned_score = 0.0001  # Avoid log(0)
+            
+        logit_value = math.log(pruned_score / (1 - pruned_score))
+        label = 1 if pruned_score >= 0.5 else 0
+
+        pruned_forward_service.patch(doc["_id"], {
+            "status": "success",
+            "result": {
+                "logits": [[logit_value]],  # Format to match regular forward pass
+                "probabilities": [[pruned_score]],  # Format to match regular forward pass  
+                "label": label
+            }
+        })
+    except Exception as e:
+        print(f"Error in pruned forward pass: {e}")
+        pruned_forward_service.patch(doc["_id"], {
+            "status": "error",
+            "error": str(e)
+        })
+
 # Bind handlers to services
 ig_service.on("created", handle_ig_prediction)
 nig_service.on("created", handle_nig_prediction)
 dataset_service.on("created", handle_sample_request)
 forward_service.on("created", handle_forward_pass_request)
+pruned_forward_service.on("created", handle_pruned_forward_pass_request)
 
 # Connect and wait indefinitely
 store.connect()

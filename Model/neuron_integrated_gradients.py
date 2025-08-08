@@ -161,7 +161,7 @@ def nig_predict(query, passage, num_reps, batch_size, baseline_function, progres
         passage,
         max_length=512,
         truncation=True,
-        padding=True,
+        padding=True,  # Use dynamic padding for faster computation
         return_attention_mask=True,
         return_tensors="pt"
     ).to(model.device)
