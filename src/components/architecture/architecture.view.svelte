@@ -21,6 +21,17 @@
 	let errorSub; // Declare errorSub variable
 	let nodePruningState = { enabled: false, rules: [], targets: [], thresholds: {} };
 
+	// Track current selection for highlighting and scrolling
+	let currentSelection = { layer: null, type: null, tokenType: null };
+
+	// Subscribe to selection changes; vanilla behavior (no scroll adjustments)
+	selection$.subscribe(sel => {
+		currentSelection = sel || { layer: null, type: null, tokenType: null };
+		if (svg) {
+			updateSelectionHighlight();
+		}
+	});
+
 	// Subscribe to pruning state changes for node coloring
 	pruningState$.subscribe(state => {
 		nodePruningState = state;
@@ -69,6 +80,56 @@
 				return shouldNodeBeRed(layerIndex, 'FFN', tokenType) ? 'darkred' : 'darkgray';
 			});
 	}
+
+	// Utility to map tokenType label to index
+	function tokenTypeToIndex(tt) {
+		const tokenTypes = ['cls', 'qry', 'sep1', 'doc', 'sep2'];
+		return tokenTypes.indexOf(tt);
+	}
+
+	// Highlight the currently selected node (circle for ATTN, square for FFN)
+	function updateSelectionHighlight() {
+	// Clear previous selection styling: only reset what we change (stroke, width, shadow)
+	svg.selectAll('.attn-circle')
+		.attr('stroke', 'white')
+		.attr('stroke-width', 3)
+		.style('filter', null);
+	svg.selectAll('.ffn-square')
+		.attr('stroke', 'white')
+		.attr('stroke-width', 3)
+		.style('filter', null);
+
+		const { layer, type, tokenType } = currentSelection || {};
+		if (layer === null || !type || !tokenType) return;
+		const tokenIdx = tokenTypeToIndex(tokenType);
+		if (tokenIdx === -1) return;
+
+		if (type === 'ATTN') {
+			const node = svg.selectAll('.attn-circle')
+				.filter(function() {
+					return parseInt(this.getAttribute('data-layer')) === layer &&
+						parseInt(this.getAttribute('data-token')) === tokenIdx;
+				});
+			node
+				.attr('stroke', '#3B82F6')
+				.attr('stroke-width', 5)
+				.style('filter', 'drop-shadow(0 0 6px #3B82F6)')
+				.raise();
+		} else if (type === 'FFN') {
+			const node = svg.selectAll('.ffn-square')
+				.filter(function() {
+					return parseInt(this.getAttribute('data-layer')) === layer &&
+						parseInt(this.getAttribute('data-token')) === tokenIdx;
+				});
+			node
+				.attr('stroke', '#3B82F6')
+				.attr('stroke-width', 5)
+				.style('filter', 'drop-shadow(0 0 6px #3B82F6)')
+				.raise();
+		}
+	}
+
+	// Removed scroll adjustments: no auto-scrolling or position preservation
 
 	// Handle click events for FFN and ATTN layers
 	function handleClick(layer, type, tokenType) {
@@ -209,7 +270,7 @@
 
 
 		const sub = combineLatest([edges$, threshold$, pruningState$]).subscribe(
-		([edges, threshold, pruningState]) => {
+	([edges, threshold, pruningState]) => {
 			console.log(`VIEW SUBSCRIPTION UPDATE:`);
 			console.log(`  Edges received: ${edges ? edges.length : 'null'}`);
 			console.log(`  Threshold: ${threshold}`);
@@ -218,6 +279,8 @@
 			if (edges && edges.length > 0) {
 				console.log(`  Drawing ${edges.length} edges`);
 				drawEdges(edges, threshold, pruningState);
+				// After drawing edges, ensure selection highlight is consistent
+	updateSelectionHighlight();
 			} else {
 				console.log(`  Clearing edges (edges: ${edges ? edges.length : 'null'})`);
 				// Clear edges if no data
@@ -347,13 +410,24 @@
 			.attr("text-anchor", "middle")
 			.text(d => `L${Math.floor(d / 2)} ${d % 2 === 0 ? 'ATTN' : 'FFN'}`)
 			.attr("class", "layer-label");
+	// Initial highlight attempt (in case selection existed before mount)
+	updateSelectionHighlight();
 	});
 </script>
 
 <div>
+	<!-- Scrollable container to match nig-table height footprint -->
 	<div id="architecture-grid" style="width: 100%; height: 100%;"></div>
 </div>
 
+
 <style>
+	/* Make the architecture grid scrollable like the nig table */
+	#architecture-grid {
+		max-height: var(--nig-table-height, 500px); /* match nig table container height */
+		overflow-y: auto;
+		border: 1px solid #ddd;
+		border-radius: 4px;
+	}
 </style>
 

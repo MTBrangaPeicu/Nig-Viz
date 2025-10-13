@@ -42,6 +42,7 @@ datasetService.create({ n: 10 });
 
 let selectedQueryId = null; // Store the selected query ID
 let currentNigId = null; // Store the current NIG result ID for threshold updates
+let lastNIGRequestInputs = null; // Capture inputs at submit time for snapshot metadata
 
 // Handle query selection
 queryInput.$value.subscribe((selectedQuery) => {
@@ -91,6 +92,140 @@ violinPlotComponent.title = 'NIG Distribution (Violin Plot)';
 
 const architectureComponent = architecture();
 architectureComponent.title = 'Architecture Grid';
+
+// ---------------- NIG SNAPSHOT CACHE (Local) ----------------
+// Each snapshot stores: id, timestamp, query, passage, data (subset_b)
+let nigSnapshots = [];
+const NIG_SNAPSHOT_KEY = 'nigSnapshotsV1';
+
+function loadPersistedSnapshots() {
+  try {
+    const raw = localStorage.getItem(NIG_SNAPSHOT_KEY);
+    if (raw) {
+      const arr = JSON.parse(raw);
+      if (Array.isArray(arr)) nigSnapshots = arr;
+    }
+  } catch (e) {
+    console.warn('[NIG SNAPSHOTS] Failed to load persisted snapshots:', e);
+  }
+}
+
+function persistSnapshots() {
+  try {
+    // Keep last 12 snapshots persisted
+    localStorage.setItem(NIG_SNAPSHOT_KEY, JSON.stringify(nigSnapshots.slice(-12)));
+  } catch (e) {
+    console.warn('[NIG SNAPSHOTS] Persist failed:', e);
+  }
+}
+
+function formatSnapshotLabel(s) {
+  const q = (s.query || '').slice(0, 25).replace(/\s+/g,' ');
+  const p = (s.passage || '').slice(0, 25).replace(/\s+/g,' ');
+  const bl = s.baselineLabel ? s.baselineLabel.split(' ')[0] : 'BL?';
+  return `${s.timestamp} | ${bl} | r=${s.numReps} | Q:${q}${q.length===25?'…':''} | P:${p}${p.length===25?'…':''}`;
+}
+
+loadPersistedSnapshots();
+
+const nigSnapshotSelect = widgets.select(
+  nigSnapshots.length ? nigSnapshots.map(formatSnapshotLabel) : ['No snapshots']
+);
+nigSnapshotSelect.title = 'Saved NIG Runs';
+
+const loadNigSnapshotBtn = widgets.button('Load Previous');
+loadNigSnapshotBtn.title = 'Reload Cached NIG';
+const clearNigSnapshotsBtn = widgets.button('Clear');
+clearNigSnapshotsBtn.title = 'Clear Snapshots';
+
+function loadNIGSnapshotData(snapshot) {
+  if (!snapshot || !snapshot.data) return;
+  const nigData = snapshot.data;
+  console.log('[SNAPSHOT LOAD] Begin load id=', snapshot.id, 'layers=', Object.keys(nigData).length);
+
+  // Restore query input (ensure option list contains it)
+  if (snapshot.query) {
+    // If query not present, append to options
+    const currentQueries = queryInput.options || []; // betterText custom prop? fallback
+    if (!currentQueries || !currentQueries.includes(snapshot.query)) {
+      const newList = [...(currentQueries || []), snapshot.query];
+      if (queryInput.updateOptions) queryInput.updateOptions(newList);
+    }
+    if (queryInput.$value) queryInput.$value.next(snapshot.query);
+  }
+
+  // Restore passage (passage options are usually set after selecting a query)
+  if (snapshot.passage) {
+    const currentPassages = passageInput.options || [];
+    if (!currentPassages || !currentPassages.includes(snapshot.passage)) {
+      const newPassages = [...(currentPassages || []), snapshot.passage];
+      if (passageInput.updateOptions) passageInput.updateOptions(newPassages);
+    }
+    if (passageInput.$value) passageInput.$value.next(snapshot.passage);
+  }
+
+  // Restore baseline selection
+  if (snapshot.baselineLabel) {
+    baselineDropdown.$value.next(snapshot.baselineLabel);
+  }
+
+  // Restore repetitions
+  if (typeof snapshot.numReps === 'number' && snapshot.numReps > 0) {
+    if (numRepsInput.$value) numRepsInput.$value.next(snapshot.numReps);
+  }
+
+  // Inject snapshot into model stream (single authoritative source). Mark so we don't re-snapshot it.
+  try {
+    if (nigModelInstance?.$data?.next) {
+      console.log('[SNAPSHOT LOAD] Injecting into model stream');
+      nigModelInstance.$data.next({ _id: `snapshot-${snapshot.id}`, __fromSnapshot: true, result: { subset_b: nigData } });
+    }
+  } catch (e) {
+    console.warn('[NIG SNAPSHOTS] Failed to inject snapshot into model instance:', e);
+  }
+
+  // If snapshot contains previous selection metadata, re-emit it to trigger normal reactive recomputation
+  const sel = snapshot.selection || snapshot.lastSelection; // backward compatibility
+  if (sel && sel.layer !== null && sel.type && sel.tokenType) {
+    try {
+    console.log('[SNAPSHOT LOAD] Re-emitting saved selection', sel);
+    architectureComponent.$selection.next(sel);
+    } catch (e) {
+      console.warn('[NIG SNAPSHOTS] Failed to re-emit selection:', e);
+    }
+  }
+  console.log('[SNAPSHOT LOAD] Completed load of', snapshot.id);
+}
+
+loadNigSnapshotBtn.$click.subscribe(() => {
+  const label = nigSnapshotSelect.$value.getValue();
+  const snap = nigSnapshots.find(s => formatSnapshotLabel(s) === label);
+  if (!snap) return;
+  console.log('[NIG SNAPSHOTS] Loading snapshot', snap.id);
+  loadNIGSnapshotData(snap);
+});
+
+clearNigSnapshotsBtn.$click.subscribe(() => {
+  nigSnapshots = [];
+  persistSnapshots();
+  nigSnapshotSelect.$options.next(['No snapshots']);
+  nigSnapshotSelect.$value.next('No snapshots');
+  console.log('[NIG SNAPSHOTS] Cleared all snapshots');
+});
+
+// Auto-apply latest snapshot on load (after widgets exist)
+if (nigSnapshots.length) {
+  const last = nigSnapshots[nigSnapshots.length - 1];
+  const lbl = formatSnapshotLabel(last);
+  nigSnapshotSelect.$value.next(lbl);
+  // Attempt immediate load
+  try {
+    loadNIGSnapshotData(last);
+    console.log('[NIG SNAPSHOTS] Auto-applied last snapshot', last.id);
+  } catch (e) {
+    console.warn('[NIG SNAPSHOTS] Auto-apply failed:', e);
+  }
+}
 
 // Use relevant models for progress bars
 const progIG = widgets.progressBar(igModelInstance.$status.pipe(map(x => ({ ...x, message: x.status }))));
@@ -143,6 +278,14 @@ submitQuery.$click.subscribe(() => {
 
 // NIG Prediction submit
 submitNIG.$click.subscribe(() => {
+  // Capture inputs at click time to ensure snapshot metadata matches the request
+  lastNIGRequestInputs = {
+    query: queryInput.$value.getValue() || '',
+    passage: passageInput.$value.getValue() || '',
+    baselineLabel: baselineDropdown.$value.getValue(),
+    numReps: numRepsInput.$value.getValue(),
+  };
+
   nigModelInstance.predict({
     query: queryInput.$value.getValue(),
     passage: passageInput.$value.getValue(),
@@ -169,35 +312,75 @@ igModelInstance.$data.subscribe(doc => {
 });
 
 // Handle NIG results
+function createSnapshotFromDoc(doc) {
+  if (!doc || !doc.result || !doc.result.subset_b) return null;
+  const nig = doc.result.subset_b;
+  // Prefer captured inputs from submit time to avoid drift
+  const meta = lastNIGRequestInputs || {
+    query: queryInput.$value.getValue() || '',
+    passage: passageInput.$value.getValue() || '',
+    baselineLabel: baselineDropdown.$value.getValue(),
+    numReps: numRepsInput.$value.getValue(),
+  };
+  return {
+    version: 2,
+    id: doc._id,
+    timestamp: new Date().toLocaleTimeString(),
+    query: meta.query,
+    passage: meta.passage,
+    baselineLabel: meta.baselineLabel,
+    numReps: meta.numReps,
+    data: nig,
+  };
+}
+
+// Single subscription: handles both live computations and injected snapshots
 nigModelInstance.$data.subscribe(doc => {
   if (!doc || !doc.result) {
     return;
+  }
+  if (doc.__fromSnapshot) {
+    console.log('[MODEL STREAM] Received injected snapshot doc id=', doc._id);
+  } else {
+    console.log('[MODEL STREAM] Received fresh computation doc id=', doc._id);
   }
 
   // Store the current NIG result ID for threshold updates
   currentNigId = doc._id;
 
-  if (doc.result.subset_b) {
-    const nig = doc.result.subset_b;
-    // const error = doc.result.error;
-    const layers = Object.keys(nig);
+  if (!doc.result.subset_b) return;
+  const nig = doc.result.subset_b;
+  console.log('[MODEL STREAM] subset_b size (layers)=', Object.keys(nig).length);
 
-    // Update dropdown options and value
-    layerDropdown.$options.next(layers.length > 0 ? layers : ['No layers available']);
-    layerDropdown.$value.next(layers.length > 0 ? layers[0] : 'No layers available');
-
-    // Update table for first layer - but don't show data initially, just indicate that NIG data exists
-    if (layers.length > 0) {
-      tableNIGS.$options.next({
-        hasNigData: true, // Flag to indicate NIG data is available
-        layer: null, // No specific layer selected yet
-        values: null, // No values to show initially
-      });
+  // Snapshot only if this is a fresh computation (not an injected snapshot)
+  if (!doc.__fromSnapshot) {
+    try {
+      const snapshot = createSnapshotFromDoc(doc);
+      if (snapshot) {
+        nigSnapshots.push(snapshot);
+        if (nigSnapshots.length > 20) nigSnapshots = nigSnapshots.slice(-20); // Keep memory list manageable (last 20)
+        persistSnapshots();
+        nigSnapshotSelect.$options.next(nigSnapshots.map(formatSnapshotLabel)); // Refresh select options
+        nigSnapshotSelect.$value.next(formatSnapshotLabel(snapshot));
+        console.log('[NIG SNAPSHOTS] Saved snapshot; total:', nigSnapshots.length);
+      }
+    } catch (e) {
+      console.warn('[NIG SNAPSHOTS] Failed to save snapshot:', e);
     }
-
-    // Feed subset_b into the architecture component for counting/visualization
-    architectureComponent.updateEdges(nig); // Removed error parameter
   }
+
+  const layers = Object.keys(nig);
+  layerDropdown.$options.next(layers.length ? layers : ['No layers available']); // Update dropdown options and value
+  layerDropdown.$value.next(layers.length ? layers[0] : 'No layers available');
+
+  if (layers.length) {
+    // Update table for first layer - but don't show data initially, just indicate that NIG data exists
+    tableNIGS.$options.next({ hasNigData: true, layer: null, values: null });
+  }
+
+  // Feed subset_b into the architecture component for counting/visualization
+  architectureComponent.updateEdges(nig); // Removed error parameter
+  console.log('[MODEL STREAM] Edges recomputed for doc id=', doc._id);
 }); 
 
 //Subscribe to layerDropdown.$value
@@ -206,27 +389,49 @@ layerDropdown.$value.subscribe(layer => {
   const nig = doc && doc.result && doc.result.subset_b;
   if (nig && nig[layer]) {
     tableNIGS.$options.next({
+      hasNigData: true,
       layer,
       type: null, // No layer type for dropdown
       tokenType: null, // No token type for dropdown
       values: nig[layer],
     });
   } else if (nig) {
-    tableNIGS.$options.next({ error: 'Invalid layer or no data' });
+    tableNIGS.$options.next({ hasNigData: true, error: 'Invalid layer or no data' });
   }
 });
 
+// Log-focused threshold slider Option 1:
+// Raw slider value s ∈ [0,1]; s = 0 => threshold = 0 (show all)
+// For s > 0: exponent e = -4 + 4*s  (maps to e ∈ [-4,0]) and threshold = 10^e (1e-4 .. 1)
+// This compresses unused ultra-small range while keeping intuitive 0..1 control.
 const thresholdSlider = widgets.slider({
-  values: [0.05], 
+  values: [0.5],           // midpoint ≈ 10^(-4 + 4*0.5) = 10^-2 = 0.01
   min: 0,
   max: 1,
   step: 0.01,
+  formatter: (s) => {
+    if (s === 0) return '0';
+    const e = -4 + 4 * s;
+    const v = Math.pow(10, e);
+    if (v === 1) return '1.000';
+    if (v >= 0.1) return v.toFixed(3);
+    if (v >= 0.01) return v.toFixed(3);
+  // For 0.001 <= v < 0.01 use 4 decimals, for 0.0001 <= v < 0.001 use 5 decimals
+  if (v >= 0.001) return v.toFixed(4);
+  return v.toFixed(5);
+  }
 });
 thresholdSlider.title = 'Threshold for NIG Values';
 
-// Subscribe to threshold slider changes
-thresholdSlider.$values.subscribe(([threshold]) => {
-  architectureComponent.updateThreshold(threshold); // Update threshold in the architecture component
+// Small descriptive text shown under the slider explaining the measurement
+const thresholdInfo = widgets.text('Select the fraction of highest-magnitude NIG values to visualize (log-scaled control). 0 = show none, 0.01 ≈ top 1%, 1 = show all (100%).');
+thresholdInfo.title = '';
+
+// Subscribe to slider value changes and propagate actual threshold
+thresholdSlider.$values.subscribe(([s]) => {
+  const threshold = s === 0 ? 0 : Math.pow(10, -4 + 4 * s);
+  console.log('[Threshold Slider] raw slider:', s, 'mapped threshold fraction:', threshold);
+  architectureComponent.updateThreshold(threshold);
 });
 
 // Handle selections from the architecture grid
@@ -510,7 +715,7 @@ dash.page('Query Review')
 
 //layerDropdown
 dash.page('NIG values')
-  .use([queryInput, passageInput],[numRepsInput, baselineDropdown], progNIG, [thresholdSlider,submitNIG] ,[architectureComponent, tableNIGS], violinPlotComponent)
+  .use([queryInput, passageInput],[numRepsInput, baselineDropdown], progNIG, [nigSnapshotSelect, clearNigSnapshotsBtn],[loadNigSnapshotBtn, submitNIG] ,[thresholdSlider, thresholdInfo],[architectureComponent, tableNIGS], violinPlotComponent)
   .sidebar( submitForwardPass, forwardPassOutput, submitPrunedForwardPass, prunedForwardPassOutput, prunerComponent);
 
 dash.show();

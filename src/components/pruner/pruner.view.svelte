@@ -12,9 +12,12 @@
   let enabledWidget;
   let toggleContainer;
 
-  // Inputs for thresholds
+  // Actual threshold values (fractions)
   let ffnThreshold = 0.0;
   let attentionThreshold = 0.0;
+  // Slider positions (0..1) for log scale mapping: value = 0 if s=0 else 10^(-4 + 4*s)
+  let ffnSliderPos = 0.0;
+  let attentionSliderPos = 0.0;
 
   // For simplicity, pruningRules as array of objects
   let pruningRules = [];
@@ -82,12 +85,14 @@
     const attentionSub = attentionThreshold$.subscribe(value => {
       if (attentionThreshold !== value) {
         attentionThreshold = value;
+        attentionSliderPos = valueToSliderPos(value);
       }
     });
 
     const ffnSub = ffnThreshold$.subscribe(value => {
       if (ffnThreshold !== value) {
         ffnThreshold = value;
+        ffnSliderPos = valueToSliderPos(value);
       }
     });
 
@@ -116,69 +121,105 @@
     };
   });
 
+  function valueToSliderPos(v){
+    if (v <= 0) return 0;
+    const pos = (Math.log10(v) + 4) / 4;
+    return Math.min(1, Math.max(0, pos));
+  }
+  function sliderPosToValue(s){
+    if (s <= 0) return 0;
+    return Math.pow(10, -4 + 4 * s);
+  }
+  function formatThreshold(v){
+    if (v === 0) return '0';
+    if (v === 1) return '1.000';
+    // For display we cap at 3 decimals as requested
+    if (v >= 0.1) return v.toFixed(3);
+    if (v >= 0.01) return v.toFixed(3);
+    if (v >= 0.001) return v.toFixed(3);
+    return v.toFixed(3); // very small values rounded to 3 decimals (may show 0.000)
+  }
+  function round3(x){
+    return parseFloat((+x).toFixed(3));
+  }
   // Handle threshold input changes with user interaction
   function handleAttentionThresholdChange(event) {
-    const value = parseFloat(event.target.value) || 0.0;
-    attentionThreshold = value; // Update local variable
+  let value = parseFloat(event.target.value) || 0.0;
+  value = round3(value);
+    attentionThreshold = value;
+    attentionSliderPos = valueToSliderPos(value);
     if (initialized && attentionThreshold$.getValue() !== value) {
       attentionThreshold$.next(value);
     }
+  // Force input value formatting to 3 decimals
+  event.target.value = formatThreshold(value);
   }
 
   function handleFFNThresholdChange(event) {
-    const value = parseFloat(event.target.value) || 0.0;
-    ffnThreshold = value; // Update local variable
+  let value = parseFloat(event.target.value) || 0.0;
+  value = round3(value);
+    ffnThreshold = value;
+    ffnSliderPos = valueToSliderPos(value);
     if (initialized && ffnThreshold$.getValue() !== value) {
       ffnThreshold$.next(value);
+    }
+  event.target.value = formatThreshold(value);
+  }
+
+  function handleFFNSliderInput(event){
+    const s = parseFloat(event.target.value) || 0;
+    ffnSliderPos = s;
+    const v = sliderPosToValue(s);
+    if (ffnThreshold !== v){
+      ffnThreshold = v;
+      if (initialized) ffnThreshold$.next(v);
+    }
+  }
+
+  function handleAttentionSliderInput(event){
+    const s = parseFloat(event.target.value) || 0;
+    attentionSliderPos = s;
+    const v = sliderPosToValue(s);
+    if (attentionThreshold !== v){
+      attentionThreshold = v;
+      if (initialized) attentionThreshold$.next(v);
     }
   }
 
   function addRule() {
     const newRule = { layer: 'L0_ATTN', tokenType: 'all' };
     pruningRules = [...pruningRules, newRule];
-    if (initialized) {
-      pruningRules$.next(pruningRules);
-    }
+    if (initialized) pruningRules$.next(pruningRules);
   }
 
   function removeRule(index) {
     pruningRules = pruningRules.filter((_, i) => i !== index);
-    if (initialized) {
-      pruningRules$.next(pruningRules);
-    }
+    if (initialized) pruningRules$.next(pruningRules);
   }
 
   function updateRule(index, field, value) {
     pruningRules = pruningRules.map((rule, i) => 
       i === index ? { ...rule, [field]: value } : rule
     );
-    if (initialized) {
-      pruningRules$.next(pruningRules);
-    }
+    if (initialized) pruningRules$.next(pruningRules);
   }
 
   function addNeuronTarget() {
     const newTarget = { layer: 'L0_ATTN', neuron: 0, tokenType: 'cls' };
     neuronTargets = [...neuronTargets, newTarget];
-    if (initialized) {
-      pruningTargets$.next(neuronTargets);
-    }
+    if (initialized) pruningTargets$.next(neuronTargets);
   }
 
   function removeNeuronTarget(index) {
     neuronTargets = neuronTargets.filter((_, i) => i !== index);
-    if (initialized) {
-      pruningTargets$.next(neuronTargets);
-    }
+    if (initialized) pruningTargets$.next(neuronTargets);
   }
 
   function updateNeuronTarget(index, field, value) {
     neuronTargets = neuronTargets.map((target, i) => 
       i === index ? { ...target, [field]: value } : target
     );
-    if (initialized) {
-      pruningTargets$.next(neuronTargets);
-    }
+    if (initialized) pruningTargets$.next(neuronTargets);
   }
 
   // Get the appropriate label for neuron input based on layer type
@@ -193,6 +234,82 @@
     }
     return neuronsPerLayer - 1; // FFN neurons
   }
+
+  // --- Snapshot system for pruner configuration ---
+  const PRUNER_SNAPSHOT_KEY = 'prunerSnapshotsV1';
+  let prunerSnapshots = [];
+  let selectedSnapshotId = '';
+
+  function loadPersistedPrunerSnapshots() {
+    try {
+      const raw = localStorage.getItem(PRUNER_SNAPSHOT_KEY);
+      if (!raw) return;
+      const arr = JSON.parse(raw);
+  if (Array.isArray(arr)) prunerSnapshots = arr;
+      if (prunerSnapshots.length && !selectedSnapshotId) {
+        selectedSnapshotId = prunerSnapshots[prunerSnapshots.length - 1].id;
+      }
+    } catch (e) {
+      console.warn('[PRUNER SNAPSHOTS] Failed to load:', e);
+    }
+  }
+
+  function persistPrunerSnapshots() {
+    try {
+  localStorage.setItem(PRUNER_SNAPSHOT_KEY, JSON.stringify(prunerSnapshots.slice(-20)));
+    } catch (e) {
+      console.warn('[PRUNER SNAPSHOTS] Persist failed:', e);
+    }
+  }
+
+  function formatPrunerSnapshotLabel(s) {
+    const ts = s.timestamp || '';
+    const a = (s.attentionThreshold ?? 0).toFixed(3);
+    const f = (s.ffnThreshold ?? 0).toFixed(3);
+    const rc = (s.pruningRules || []).length;
+    const tc = (s.pruningTargets || []).length;
+  return `${ts} | attn=${a} ffn=${f} | rules:${rc} targets:${tc}`;
+  }
+
+  function savePrunerSnapshot() {
+    const snap = {
+      id: `pruner-${Date.now()}`,
+      timestamp: new Date().toLocaleTimeString(),
+      attentionThreshold: attentionThreshold$.getValue(),
+      ffnThreshold: ffnThreshold$.getValue(),
+      pruningRules: pruningRules$.getValue(),
+      pruningTargets: pruningTargets$.getValue(),
+    };
+    prunerSnapshots.push(snap);
+    if (prunerSnapshots.length > 50) prunerSnapshots = prunerSnapshots.slice(-50);
+    selectedSnapshotId = snap.id;
+    persistPrunerSnapshots();
+  }
+
+  function loadSelectedPrunerSnapshot() {
+    const snap = prunerSnapshots.find(s => s.id === selectedSnapshotId);
+    if (!snap) return;
+    // Push into BehaviorSubjects; UI will sync via existing subscriptions
+    attentionThreshold$.next(snap.attentionThreshold ?? 0);
+    ffnThreshold$.next(snap.ffnThreshold ?? 0);
+    pruningRules$.next(Array.isArray(snap.pruningRules) ? snap.pruningRules : []);
+    pruningTargets$.next(Array.isArray(snap.pruningTargets) ? snap.pruningTargets : []);
+  }
+
+  function deleteSelectedPrunerSnapshot() {
+    if (!selectedSnapshotId) return;
+    prunerSnapshots = prunerSnapshots.filter(s => s.id !== selectedSnapshotId);
+    if (prunerSnapshots.length) {
+      selectedSnapshotId = prunerSnapshots[prunerSnapshots.length - 1].id;
+    } else {
+      selectedSnapshotId = '';
+    }
+    persistPrunerSnapshots();
+  }
+
+  onMount(() => {
+    loadPersistedPrunerSnapshots();
+  });
 </script>
 
 <style>
@@ -292,6 +409,21 @@
   .add-button:hover, .remove-button:hover {
     opacity: 0.7;
   }
+  .slider-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 6px 0 10px 80px; /* indent to align with number input after label */
+  }
+  .slider-row input[type=range] {
+    flex: 1;
+  }
+  .slider-value {
+    font-size: 0.8rem;
+    font-weight: 600;
+    width: 60px;
+    text-align: right;
+  }
 </style>
 
 <div>
@@ -300,15 +432,43 @@
 
 <hr style="margin: 20px 0;" />
 
+<h3>Saved Prunes</h3>
+<div style="display: flex; gap: 8px; align-items: center; margin-bottom: 8px;">
+  <select bind:value={selectedSnapshotId} style="flex: 1;">
+    {#if prunerSnapshots.length === 0}
+      <option value="" disabled>No saved prunes</option>
+    {:else}
+      {#each prunerSnapshots as s}
+        <option value={s.id}>{formatPrunerSnapshotLabel(s)}</option>
+      {/each}
+    {/if}
+  </select>
+  <button class="add-button" title="Save current pruning config" on:click={savePrunerSnapshot}>+</button>
+  <button class="remove-button" title="Delete selected prune" on:click={deleteSelectedPrunerSnapshot}>×</button>
+  <button title="Load selected prune" on:click={loadSelectedPrunerSnapshot}>Load</button>
+  <button title="Clear all prunes" on:click={() => { prunerSnapshots = []; selectedSnapshotId=''; persistPrunerSnapshots(); }}>Clear</button>
+  
+</div>
+
+<hr style="margin: 20px 0;" />
+
 <h3>Strategy Thresholds</h3>
 
 <div>
   <label for="ffn-threshold">FFN</label>
-  <input id="ffn-threshold" type="number" value={ffnThreshold} on:input={handleFFNThresholdChange} min="0" max="1" step="0.01" />
+  <input id="ffn-threshold" type="number" value={formatThreshold(ffnThreshold)} on:input={handleFFNThresholdChange} min="0" max="1" step="0.001" pattern="^\\d*(\\.\\d{0,3})?$" />
+  <div class="slider-row">
+    <input type="range" min="0" max="1" step="0.001" value={ffnSliderPos} on:input={handleFFNSliderInput} aria-label="FFN pruning threshold slider (log-scale)" />
+    <span class="slider-value">{formatThreshold(ffnThreshold)}</span>
+  </div>
 </div>
 <div>
   <label for="attention-threshold">Attention</label>
-  <input id="attention-threshold" type="number" value={attentionThreshold} on:input={handleAttentionThresholdChange} min="0" max="1" step="0.01" />
+  <input id="attention-threshold" type="number" value={formatThreshold(attentionThreshold)} on:input={handleAttentionThresholdChange} min="0" max="1" step="0.001" pattern="^\\d*(\\.\\d{0,3})?$" />
+  <div class="slider-row">
+    <input type="range" min="0" max="1" step="0.001" value={attentionSliderPos} on:input={handleAttentionSliderInput} aria-label="Attention pruning threshold slider (log-scale)" />
+    <span class="slider-value">{formatThreshold(attentionThreshold)}</span>
+  </div>
 </div>
 
 <hr style="margin: 20px 0;" />
