@@ -18,14 +18,16 @@ from transformers import AutoModelForSequenceClassification, AutoTokenizer
 import torch
 
 # Setup DataStore and Services
-store = DataStore("http://localhost:3030")
+# store = DataStore("http://localhost:3030")
+store = DataStore("https://marcelle.lisn.upsaclay.fr/nig-viz/api")
+
 ig_service = store.service("predictions")
 nig_service = store.service("nig-values")
 dataset_service = store.service("msmarco-samples")
 forward_service = store.service("forward-pass")
 pruned_forward_service = store.service("pruned-forward-pass")
 
-# Initialize MS MARCO from ir_datasets 
+# Initialize MS MARCO from ir_datasets
 print("Initializing ir_datasets: msmarco-passage/trec-dl-2019/judged ...")
 ir_ds = ir_datasets.load("msmarco-passage/trec-dl-2019/judged")
 
@@ -67,9 +69,12 @@ BASELINE_MAP = {
 BATCH_SIZE = 10
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
-model = AutoModelForSequenceClassification.from_pretrained("cross-encoder/ms-marco-MiniLM-L12-v2").to(device)
+model = AutoModelForSequenceClassification.from_pretrained(
+    "cross-encoder/ms-marco-MiniLM-L12-v2"
+).to(device)
 model.eval()
 tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
+
 
 def get_random_samples(n=10, max_passages_per_query=10):
     """Get n random samples from ir_datasets (TREC DL 2019 judged queries with judged passages).
@@ -125,39 +130,37 @@ def get_random_samples(n=10, max_passages_per_query=10):
             if doc_texts.get(did, "")
         ]
         if passages:
-            samples.append({
-                "query": q.text,
-                "passages": passages,
-            })
+            samples.append(
+                {
+                    "query": q.text,
+                    "passages": passages,
+                }
+            )
 
     return samples
+
 
 # --- Dataset sample handler ---
 def handle_sample_request(doc):
     try:
         print(f"Received sample request: {doc}")
-        n_samples = doc.get('n', 10)
+        n_samples = doc.get("n", 10)
         samples = get_random_samples(n_samples)
         if not samples:
             print("No samples generated.")
-            dataset_service.patch(doc["_id"], {
-                "status": "error",
-                "error": "No samples could be generated."
-            })
+            dataset_service.patch(
+                doc["_id"],
+                {"status": "error", "error": "No samples could be generated."},
+            )
             return
         print(f"samples Generated")
         # Ensure the samples field is included in the response
-        dataset_service.patch(doc["_id"], {
-            "status": "success",
-            "samples": samples
-        })
-        #print(f"Response sent to frontend: {samples}")
+        dataset_service.patch(doc["_id"], {"status": "success", "samples": samples})
+        # print(f"Response sent to frontend: {samples}")
     except Exception as e:
         print(f"Error handling sample request: {e}")
-        dataset_service.patch(doc["_id"], {
-            "status": "error",
-            "error": str(e)
-        })
+        dataset_service.patch(doc["_id"], {"status": "error", "error": str(e)})
+
 
 # --- IG prediction handler ---
 def handle_ig_prediction(doc):
@@ -179,7 +182,7 @@ def handle_ig_prediction(doc):
             ig_service.patch(id, {"progress": progress})
 
         ig_result, error = predict(
-            query, passage, num_reps, BATCH_SIZE, baseline_func, progress_callback 
+            query, passage, num_reps, BATCH_SIZE, baseline_func, progress_callback
         )
 
         result = {
@@ -188,22 +191,17 @@ def handle_ig_prediction(doc):
             "error": error,
         }
 
-        ig_service.patch(id, {
-            "status": "success",
-            "progress": 1,
-            "result": result
-        })
+        ig_service.patch(id, {"status": "success", "progress": 1, "result": result})
     except Exception as e:
-        ig_service.patch(id, {
-            "status": "error",
-            "data": str(e)
-        })
+        ig_service.patch(id, {"status": "error", "data": str(e)})
     finally:
         lock.release()
+
 
 # --- NIG prediction handler ---
 # Global variable to store full NIGs in memory
 full_nigs_memory = {}
+
 
 def handle_nig_prediction(doc):
     id = doc["_id"]
@@ -224,7 +222,7 @@ def handle_nig_prediction(doc):
             nig_service.patch(id, {"progress": progress})
 
         nig, error, sep_position = nig_predict(
-            query, passage, num_reps, BATCH_SIZE, baseline_func, progress_callback 
+            query, passage, num_reps, BATCH_SIZE, baseline_func, progress_callback
         )
 
         # Store full NIGs in memory
@@ -253,22 +251,18 @@ def handle_nig_prediction(doc):
             # "error": error,  # Commented out - error rates too high, keeping as NA
         }
 
-        #print("[DEBUG] Subset B keys (about to send):", list(subset_b.keys()))
-        #print("[DEBUG] Patch payload:", formatted_result)
+        # print("[DEBUG] Subset B keys (about to send):", list(subset_b.keys()))
+        # print("[DEBUG] Patch payload:", formatted_result)
 
-        nig_service.patch(id, {
-            "status": "success",
-            "progress": 1,
-            "result": formatted_result
-        })
+        nig_service.patch(
+            id, {"status": "success", "progress": 1, "result": formatted_result}
+        )
     except Exception as e:
         print(f"Error in handle_nig_prediction: {e}")
-        nig_service.patch(id, {
-            "status": "error",
-            "data": str(e)
-        })
+        nig_service.patch(id, {"status": "error", "data": str(e)})
     finally:
         lock.release()
+
 
 # --- Forward pass handler ---
 def handle_forward_pass_request(doc):
@@ -285,62 +279,65 @@ def handle_forward_pass_request(doc):
             truncation=True,
             padding=True,  # Use dynamic padding for consistency
             return_attention_mask=True,
-            return_tensors="pt"
+            return_tensors="pt",
         ).to(device)
 
         outputs = model(**inputs)
         probabilities = torch.sigmoid(outputs.logits).tolist()
         label = 1 if probabilities[0][0] >= 0.5 else 0
 
-        forward_service.patch(doc["_id"], {
-            "status": "success",
-            "result": {
-                "logits": outputs.logits.tolist(),
-                "probabilities": probabilities,
-                "label": label
-            }
-        })
+        forward_service.patch(
+            doc["_id"],
+            {
+                "status": "success",
+                "result": {
+                    "logits": outputs.logits.tolist(),
+                    "probabilities": probabilities,
+                    "label": label,
+                },
+            },
+        )
     except Exception as e:
-        forward_service.patch(doc["_id"], {
-            "status": "error",
-            "error": str(e)
-        })
+        forward_service.patch(doc["_id"], {"status": "error", "error": str(e)})
+
 
 def handle_pruned_forward_pass_request(doc):
     try:
         print(f"Received pruned forward pass request: {doc}")
-        
+
         query = doc.get("query")
         passage = doc.get("passage")
         pruning_percentage_attention = doc.get("pruning_percentage_attention", 0.01)
         pruning_percentage_ffn = doc.get("pruning_percentage_ffn", 0.01)
-        
+
         # NEW: Get pruning rules and targets from the frontend
         pruning_rules = doc.get("pruning_rules", [])
         pruning_targets = doc.get("pruning_targets", [])
         pruning_enabled = doc.get("pruning_enabled", False)
-        
+
         print(f"Query: {query}")
         print(f"Passage: {passage}")
         print(f"Pruning enabled: {pruning_enabled}")
         print(f"Pruning rules: {pruning_rules}")
         print(f"Pruning targets: {pruning_targets}")
-        
+
         if not query or not passage:
-            pruned_forward_service.patch(doc["_id"], {
-                "status": "error",
-                "error": "Missing query or passage"
-            })
+            pruned_forward_service.patch(
+                doc["_id"], {"status": "error", "error": "Missing query or passage"}
+            )
             return
 
         # Get the most recent NIG data from memory
         if not full_nigs_memory:
-            pruned_forward_service.patch(doc["_id"], {
-                "status": "error", 
-                "error": "No NIG data available. Please run NIG values calculation first."
-            })
+            pruned_forward_service.patch(
+                doc["_id"],
+                {
+                    "status": "error",
+                    "error": "No NIG data available. Please run NIG values calculation first.",
+                },
+            )
             return
-        
+
         # Get the most recent NIG data (for now, use the last entry)
         # In production, might want to match by query/passage or use a better strategy
         latest_nig_id = max(full_nigs_memory.keys())
@@ -351,12 +348,12 @@ def handle_pruned_forward_pass_request(doc):
         print("Generating pruning masks...")
         # Generate pruning masks using original NIG data PLUS rules and targets
         top_neurons = get_masks(
-            raw_nig_data, 
-            pruning_percentage_attention, 
+            raw_nig_data,
+            pruning_percentage_attention,
             pruning_percentage_ffn,
             pruning_rules=pruning_rules if pruning_enabled else [],
             pruning_targets=pruning_targets if pruning_enabled else [],
-            sep_position=sep_position
+            sep_position=sep_position,
         )
         print(f"Generated masks for {len(top_neurons)} layers")
 
@@ -368,7 +365,7 @@ def handle_pruned_forward_pass_request(doc):
             truncation=True,
             padding=True,  # Use dynamic padding to match NIG calculation
             return_attention_mask=True,
-            return_tensors="pt"
+            return_tensors="pt",
         ).to(device)
 
         # Get the actual sequence length (excluding padding)
@@ -383,7 +380,7 @@ def handle_pruned_forward_pass_request(doc):
                 tokenizer=tokenizer,
                 inputs=inputs,
                 neurons_to_prune=top_neurons,
-                input_length=actual_length  # Use actual sequence length
+                input_length=actual_length,  # Use actual sequence length
             )
             print(f"Pruned forward pass completed, score: {pruned_score}")
         except Exception as e:
@@ -392,32 +389,36 @@ def handle_pruned_forward_pass_request(doc):
 
         # Convert to same format as regular forward pass
         print(f"Pruned score type: {type(pruned_score)}, value: {pruned_score}")
-        
+
         # Convert score to logit-like format and create response
         # Since pruned_forward returns a probability, convert back to logit format
         import math
+
         if pruned_score >= 1.0:
             pruned_score = 0.9999  # Avoid log(0)
         elif pruned_score <= 0.0:
             pruned_score = 0.0001  # Avoid log(0)
-            
+
         logit_value = math.log(pruned_score / (1 - pruned_score))
         label = 1 if pruned_score >= 0.5 else 0
 
-        pruned_forward_service.patch(doc["_id"], {
-            "status": "success",
-            "result": {
-                "logits": [[logit_value]],  # Format to match regular forward pass
-                "probabilities": [[pruned_score]],  # Format to match regular forward pass  
-                "label": label
-            }
-        })
+        pruned_forward_service.patch(
+            doc["_id"],
+            {
+                "status": "success",
+                "result": {
+                    "logits": [[logit_value]],  # Format to match regular forward pass
+                    "probabilities": [
+                        [pruned_score]
+                    ],  # Format to match regular forward pass
+                    "label": label,
+                },
+            },
+        )
     except Exception as e:
         print(f"Error in pruned forward pass: {e}")
-        pruned_forward_service.patch(doc["_id"], {
-            "status": "error",
-            "error": str(e)
-        })
+        pruned_forward_service.patch(doc["_id"], {"status": "error", "error": str(e)})
+
 
 # Bind handlers to services
 ig_service.on("created", handle_ig_prediction)

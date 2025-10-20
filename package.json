@@ -18,6 +18,7 @@
     "@marcellejs/gui-widgets": "link:../marcelle/packages/gui-widgets",
     "@marcellejs/layouts": "link:../marcelle/packages/layouts",
     "@marcellejs/tensorflow": "link:../marcelle/packages/tensorflow",
+    "d3": "^7.9.0",
     "rxjs": "^7.8.1"
   },
   "devDependencies": {

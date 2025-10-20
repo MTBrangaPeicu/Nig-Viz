@@ -7,7 +7,7 @@ import { dashboard } from '@marcellejs/layouts';
 import { nigtable, nigModel, architecture, betterNumber, betterText, pruner, violinplot} from './components';
 import { map } from 'rxjs';
 
-const store = core.dataStore('http://localhost:3030');
+const store = core.dataStore('https://marcelle.lisn.upsaclay.fr/nig-viz/api/');
 
 // Create separate models for IG and NIG connecting to Python service
 const igModelInstance = nigModel(store, 'predictions');

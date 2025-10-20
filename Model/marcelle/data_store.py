@@ -1,3 +1,4 @@
+import urllib
 import socketio
 from .utils import conform_dict
 
@@ -37,7 +38,13 @@ class DataStore:
     #     self.connect_callback = callback
 
     def connect(self, email=None, password=None):
-        self.sio.connect(self.location)
+        # Fix weird path issue with python-engineio
+        parsed_url = urllib.parse.urlparse(self.location)
+        self.sio.connect(
+            parsed_url.scheme + "://" + parsed_url.netloc,
+            transports=["websocket", "polling"],
+            socketio_path=parsed_url.path + "socket.io",
+        )
         if email is not None and password is not None:
             self.login(email, password)
         return self
