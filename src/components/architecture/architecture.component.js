@@ -8,7 +8,8 @@ export class Architecture extends Component {
 		super();
 		this.title = 'architecture [custom component 🤖]';
 		this.options = options;
-		this.$selection = new BehaviorSubject({ layer: null, tokenType: null, range: null });
+		// Two-step selection model: { source: {layer,type,tokenType}, target: {layer/type/tokenType|TOP}|null }
+		this.$selection = new BehaviorSubject({ source: null, target: null });
 		this.$threshold = new BehaviorSubject(0.05);
 		this.subsetBData$ = new BehaviorSubject(null); // Store subset_b data for counting
 		this.edges$ = new BehaviorSubject([]); // Store computed edges for visualization
@@ -20,8 +21,8 @@ export class Architecture extends Component {
 	updateEdges(subsetB, error = null) {
 		// Store the subset_b data for real-time threshold calculations in frontend
 		this.subsetBData$.next(subsetB);
-		// Store the error rate - commented out for now, keeping as NA
-		// this.$error.next(error);
+		// Store the error rate
+		//this.$error.next(error);
 		// Trigger edge computation with current threshold
 		this.computeEdgesFromSubsetB();
 	}

@@ -1,8 +1,9 @@
 import numpy as np
 from marcelle import DataStore
 import threading
-from datasets import load_dataset
 import random
+from collections import defaultdict
+import ir_datasets
 from integrated_gradients import predict
 from neuron_integrated_gradients import nig_predict
 from aggregation import aggregate_nig  # Import aggregation logic
@@ -24,10 +25,34 @@ dataset_service = store.service("msmarco-samples")
 forward_service = store.service("forward-pass")
 pruned_forward_service = store.service("pruned-forward-pass")
 
-# Initialize the MS MARCO development dataset
-print("Initializing MS MARCO development dataset from Hugging Face...")
-dataset = load_dataset("ms_marco", "v2.1", split="validation")  
-print("Dataset initialized.")
+# Initialize MS MARCO from ir_datasets 
+print("Initializing ir_datasets: msmarco-passage/trec-dl-2019/judged ...")
+ir_ds = ir_datasets.load("msmarco-passage/trec-dl-2019/judged")
+
+# Cache queries (small set for TREC DL 2019 judged)
+queries_list = list(ir_ds.queries_iter())
+print(f"Loaded {len(queries_list)} queries")
+
+# Build qrels map: query_id -> list of relevant doc_ids (relevance > 0)
+qrels_by_q = defaultdict(list)
+for qr in ir_ds.qrels_iter():
+    try:
+        rel = qr.relevance
+    except Exception:
+        rel = getattr(qr, "relevance", 0)
+    if rel and rel > 0:
+        qrels_by_q[qr.query_id].append(qr.doc_id)
+
+for qid in qrels_by_q:
+    random.shuffle(qrels_by_q[qid])
+
+# Try to get a docs store for random access by doc_id (preferred)
+docs_store = None
+try:
+    if hasattr(ir_ds, "docs_store"):
+        docs_store = ir_ds.docs_store()
+except Exception:
+    docs_store = None
 
 # Threading lock to handle concurrent runs safely
 lock = threading.Lock()
@@ -46,19 +71,65 @@ model = AutoModelForSequenceClassification.from_pretrained("cross-encoder/ms-mar
 model.eval()
 tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
 
-def get_random_samples(n=10):
-    """Get n random samples from the Hugging Face MS MARCO dataset."""
-    dataset_list = list(dataset)  # Convert the dataset to a list
-    random_samples = random.sample(dataset_list, n)  # Select n random samples directly
-    samples = [
-        {
-            "query": sample["query"],
-            "passages": [
-                {"text": text} for text in sample["passages"]["passage_text"] if text  # Extract valid passage texts from the passage_text field
-            ],
-        }
-        for sample in random_samples
-    ]
+def get_random_samples(n=10, max_passages_per_query=10):
+    """Get n random samples from ir_datasets (TREC DL 2019 judged queries with judged passages).
+
+    Each sample has shape: { query: str, passages: [{text: str}, ...] }
+    Passages are drawn from judged relevant docs when available; queries with no judged docs are skipped.
+    """
+    if not queries_list:
+        return []
+
+    # Randomly permute query indices and collect samples with judged docs
+    indices = list(range(len(queries_list)))
+    random.shuffle(indices)
+
+    selected = []
+    needed_doc_ids = set()
+    for idx in indices:
+        if len(selected) >= n:
+            break
+        q = queries_list[idx]
+        doc_ids = qrels_by_q.get(q.query_id, [])
+        if not doc_ids:
+            continue
+        # select up to max_passages_per_query doc ids
+        chosen = doc_ids[:max_passages_per_query]
+        needed_doc_ids.update(chosen)
+        selected.append((q, chosen))
+
+    if not selected:
+        return []
+
+    # Fetch doc texts
+    doc_texts = {}
+    if docs_store is not None:
+        for did in needed_doc_ids:
+            d = docs_store.get(did)
+            if d is not None:
+                doc_texts[did] = getattr(d, "text", "") or ""
+    else:
+        # Fallback: scan docs_iter until all needed doc_ids found
+        for d in ir_ds.docs_iter():
+            if d.doc_id in needed_doc_ids:
+                doc_texts[d.doc_id] = getattr(d, "text", "") or ""
+                if len(doc_texts) == len(needed_doc_ids):
+                    break
+
+    # Build samples
+    samples = []
+    for q, doc_ids in selected:
+        passages = [
+            {"text": doc_texts.get(did, "")}
+            for did in doc_ids
+            if doc_texts.get(did, "")
+        ]
+        if passages:
+            samples.append({
+                "query": q.text,
+                "passages": passages,
+            })
+
     return samples
 
 # --- Dataset sample handler ---
@@ -271,14 +342,14 @@ def handle_pruned_forward_pass_request(doc):
             return
         
         # Get the most recent NIG data (for now, use the last entry)
-        # In production, you might want to match by query/passage or use a better strategy
+        # In production, might want to match by query/passage or use a better strategy
         latest_nig_id = max(full_nigs_memory.keys())
         nig_memory_data = full_nigs_memory[latest_nig_id]
         raw_nig_data = nig_memory_data["nig"]
         sep_position = nig_memory_data["sep_position"]
 
         print("Generating pruning masks...")
-        # Generate pruning masks using your original NIG data PLUS rules and targets
+        # Generate pruning masks using original NIG data PLUS rules and targets
         top_neurons = get_masks(
             raw_nig_data, 
             pruning_percentage_attention, 

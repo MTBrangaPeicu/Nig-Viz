@@ -435,53 +435,92 @@ thresholdSlider.$values.subscribe(([s]) => {
 });
 
 // Handle selections from the architecture grid
-architectureComponent.$selection.subscribe(({ layer, type, tokenType }) => {
-	console.log("Architecture Selection - Layer:", layer, "Type:", type, "Token Type:", tokenType);
+architectureComponent.$selection.subscribe(sel => {
+  // sel: { source, target }
+  const { source, target } = sel || {};
+  // Clear table if incomplete or empty selection
+  if (!source || !target) {
+    tableNIGS.$options.next({ ...tableNIGS.$options.getValue(), values: null });
+    return;
+  }
 
-	const doc = nigModelInstance.$data.getValue();
-	const nig = doc && doc.result && doc.result.subset_b;
-	const layerKey = `bert.encoder.layer.${layer}.${type === 'FFN' ? 'intermediate.dense' : 'attention.self.attention_probs'}`; 
-	console.log("Constructed Layer Key:", layerKey);
+  const doc = nigModelInstance.$data.getValue();
+  const nig = doc && doc.result && doc.result.subset_b;
+  if (!nig) return;
 
-	// Get current pruning cutoffs from architecture component
-	const pruningCutoffs = architectureComponent.pruningCutoffs$.getValue();
+  // Determine which underlying layer's data to extract based on pair type
+  // Cases:
+  // 1. ATTN(source) -> FFN(target same layer): show ATTN src->all tgts (orientation src→tgts)
+  // 2. FFN(source) -> ATTN(target next layer, same token): show FFN neuron vector for that token
+  // 3. FFN(source) -> ATTN(target same layer): show ATTN tgt -> all srcs (orientation tgt→srcs)
+  // 4. FFN L11 -> TOP: show FFN neuron vector for that token (layer 11)
 
-	if (nig && nig[layerKey]) {
-    const layerData = nig[layerKey];
-		const tokenIndex = ['cls', 'qry', 'sep1', 'doc', 'sep2'].indexOf(tokenType); // Map tokenType to index
-		if (tokenIndex !== -1) {
-      if (type === 'ATTN' && Array.isArray(layerData) && Array.isArray(layerData[0]) && Array.isArray(layerData[0][0])) {
-        // layerData: (12, 5, 5) => attention from tokenIndex to all others
-        const values = layerData.map(head => head.map(row => row[tokenIndex])); // shape (12, 5)
-        tableNIGS.$options.next({
-          hasNigData: true,
-          layer: layerKey,
-          type,
-          tokenType,
-          values,
-          pruningCutoffs, // Pass pruning cutoffs to nigtable
-        });
-        violinPlotComponent.$options.next({ layer: layerKey, type, tokenType, values: layerData});
-      } else if (type === 'FFN' && Array.isArray(layerData) && Array.isArray(layerData[tokenIndex])) {
-        // layerData: (5, 1536) => FFN activation per token type
-        tableNIGS.$options.next({
-          hasNigData: true,
-          layer: layerKey,
-          type,
-          tokenType,
-          values: layerData[tokenIndex],
-          pruningCutoffs, // Pass pruning cutoffs to nigtable
-        });
-        violinPlotComponent.$options.next({ layer: layerKey, type, tokenType,values: layerData });
-      } else {
-        console.log("Error: Invalid token type or malformed data structure");
-        tableNIGS.$options.next({ 
-          hasNigData: true,
-          error: 'Invalid token type or data' 
-        });
-      }
+  const pruningCutoffs = architectureComponent.pruningCutoffs$.getValue();
+  const tokenTypes = ['cls', 'qry', 'sep1', 'doc', 'sep2'];
+
+  function attnLayerKey(layerIdx) {
+    return `bert.encoder.layer.${layerIdx}.attention.self.attention_probs`;
+  }
+  function ffnLayerKey(layerIdx) {
+    return `bert.encoder.layer.${layerIdx}.intermediate.dense`;
+  }
+
+  const src = source;
+  const tgt = target;
+  let layerKey, type, tokenType, values;
+
+  if (src.type === 'ATTN' && tgt.type === 'FFN' && src.layer === tgt.layer) {
+    layerKey = attnLayerKey(src.layer);
+    type = 'ATTN';
+    tokenType = src.tokenType;
+    const layerData = nig[layerKey]; // shape (12,5,5) [head][tgt][src]
+    const tokenIndex = tokenTypes.indexOf(tokenType);
+    if (layerData && tokenIndex !== -1) {
+      values = layerData.map(head => head.map(row => row[tokenIndex])); // (12,5)
     }
-	}
+  } else if (src.type === 'FFN' && tgt.type === 'ATTN' && tgt.layer === src.layer + 1 && src.tokenType === tgt.tokenType) {
+    layerKey = ffnLayerKey(src.layer);
+    type = 'FFN';
+    tokenType = src.tokenType;
+    const layerData = nig[layerKey]; // shape (5, neurons)
+    const tokenIndex = tokenTypes.indexOf(tokenType);
+    if (layerData && tokenIndex !== -1) values = layerData[tokenIndex];
+  } else if (src.type === 'FFN' && tgt.type === 'ATTN' && tgt.layer === src.layer) {
+    // Same-layer reverse attention view (tgt token attends to all src tokens)
+    layerKey = attnLayerKey(src.layer);
+    type = 'ATTN';
+    tokenType = tgt.tokenType; // we take target token as focus for reverse orientation
+    const layerData = nig[layerKey];
+    const tokenIndex = tokenTypes.indexOf(tokenType);
+    if (layerData && tokenIndex !== -1) {
+      // For each head take the row corresponding to target token (tgtToken -> all src tokens)
+      values = layerData.map(head => head[tokenIndex]); // shape (12,5)
+    }
+  } else if (src.type === 'FFN' && tgt.type === 'TOP' && src.layer === 11) {
+    layerKey = ffnLayerKey(src.layer);
+    type = 'FFN';
+    tokenType = src.tokenType;
+    const layerData = nig[layerKey];
+    const tokenIndex = tokenTypes.indexOf(tokenType);
+    if (layerData && tokenIndex !== -1) values = layerData[tokenIndex];
+  } else {
+    // Unsupported pair -> clear
+    tableNIGS.$options.next({ hasNigData: true, layer: null, type: null, tokenType: null, values: null });
+    return;
+  }
+
+  if (values === undefined || values === null) {
+    tableNIGS.$options.next({ hasNigData: true, layer: layerKey, type, tokenType, values: null, pruningCutoffs });
+    return;
+  }
+
+  tableNIGS.$options.next({ hasNigData: true, layer: layerKey, type, tokenType, values, pruningCutoffs });
+  // Violin plot gets the full underlying tensor for its layer (for ATTN give raw head tensor; for FFN give all token rows)
+  if (type === 'ATTN') {
+    violinPlotComponent.$options.next({ layer: layerKey, type, tokenType, values: nig[layerKey] });
+  } else if (type === 'FFN') {
+    violinPlotComponent.$options.next({ layer: layerKey, type, tokenType, values: nig[layerKey] });
+  }
 });
 
 // Handle selections from the dropdown

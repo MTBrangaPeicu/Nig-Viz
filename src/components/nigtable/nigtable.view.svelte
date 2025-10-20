@@ -5,27 +5,8 @@
 	let options = {};
 	let pruningState = { enabled: false, rules: [], targets: [], thresholds: {} };
 
-	// DOM refs for measuring full height (header + table) when ATTN is displayed
-	let attnTableEl;
-	let componentRootEl;
 
-	function updateSharedHeightFromATTN() {
-		if (componentRootEl && options.type === 'ATTN') {
-			// Use the component's full content height (header + table)
-			const h = Math.round(componentRootEl.scrollHeight || componentRootEl.getBoundingClientRect().height);
-			if (h && Number.isFinite(h)) {
-				document.documentElement.style.setProperty('--nig-table-height', `${h}px`);
-			}
-		}
-	}
 
-	onMount(() => {
-		updateSharedHeightFromATTN();
-	});
-
-	afterUpdate(() => {
-		updateSharedHeightFromATTN();
-	});
 
 	options$.subscribe(value => {
 		options = value;
@@ -153,7 +134,7 @@
 	}
 </script>
 
-<div bind:this={componentRootEl}>
+<div>
 	<h3 class="my-color">
 		Layer: {options.layer || "None selected"} |
 		LayerType: {options.type || "None selected"} |
@@ -187,8 +168,8 @@
 		</div>
 
 	<!-- ATTN table -->
-	{:else if options.type === 'ATTN' && Array.isArray(options.values)}
-		<table class="nig-table" bind:this={attnTableEl}>
+    {:else if options.type === 'ATTN' && Array.isArray(options.values)}
+		<table class="nig-table">
 			<thead>
 				<tr>
 					<th></th>
