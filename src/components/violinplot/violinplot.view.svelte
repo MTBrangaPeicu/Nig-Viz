@@ -73,7 +73,7 @@
 
     const yTicks = [-0.06, -0.01, -0.005, 0, 0.005, 0.01, 0.06];  // Keep original ticks
     svg.append('g')
-      .attr('transform', `translate(${margin.left},0)`)
+      .attr('transform', `translate(${margin.left},0)`) 
       .call(d3.axisLeft(y).tickValues(yTicks).tickFormat(d3.format(".3f")));
 
     // Add horizontal reference line at y=0
@@ -167,13 +167,13 @@
       }
     });
 
-    const kde = (kernel, thresholds) => V => thresholds.map(t => [t, d3.mean(V, d => kernel(t - d))]);
+  const kde = (kernel, thresholds) => V => thresholds.map(t => [t, d3.mean(V, d => kernel(t - d))]);
     const epanechnikov = bw => x => Math.abs(x /= bw) <= 1 ? 0.75 * (1 - x * x) / bw : 0;
     
     // Much more conservative approach - only create thresholds around actual data
     const allValues = data.map(d => d.value);
-    const dataMin = d3.min(allValues);
-    const dataMax = d3.max(allValues);
+  const dataMin = d3.min(allValues);
+  const dataMax = d3.max(allValues);
     const dataRange = dataMax - dataMin;
     
     // Less sensitive threshold for showing violins - avoid over-interpretation
@@ -209,13 +209,16 @@
         if (maxDensity > 1e-6) {  // Less sensitive density threshold
           // Scale violin width - use a portion of available bandwidth
           const violinWidth = x.bandwidth() * 0.6;
-          const xScale = d3.scaleLinear()
-            .domain([0, maxDensity])
-            .range([0, violinWidth / 2]);
+          // Log-scale width for density so thin tails remain visible
+          const densityFloor = Math.max(1e-6, d3.min(bins, d => (d[1] > 0 ? d[1] : Infinity)) || 1e-6);
+          const xScale = d3.scaleLog()
+            .domain([densityFloor, Math.max(densityFloor * 10, maxDensity)])
+            .range([0, violinWidth / 2])
+            .clamp(true);
 
           const area = d3.area()
-            .x0(d => centerX - xScale(d[1]))
-            .x1(d => centerX + xScale(d[1]))
+            .x0(d => centerX - (d[1] > 0 ? xScale(d[1]) : 0))
+            .x1(d => centerX + (d[1] > 0 ? xScale(d[1]) : 0))
             .y(d => y(d[0]))
             .curve(d3.curveBasis); // Less aggressive smoothing
 

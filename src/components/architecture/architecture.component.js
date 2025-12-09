@@ -16,6 +16,16 @@ export class Architecture extends Component {
 		this.$error = new BehaviorSubject(null); // Store NIG error rate
 		this.pruningState$ = new BehaviorSubject({ enabled: false, rules: [], targets: [], thresholds: {} }); // Store pruning state
 		this.pruningCutoffs$ = new BehaviorSubject({ attention: 0, ffn: 0 }); // Store computed pruning cutoffs
+		// Expose the global cutoff used to draw edges (computed from global absolute values pool)
+		this.globalCutoff$ = new BehaviorSubject(0);
+		// New: emit clicks on ATTN layer labels for token-by-token heatmap requests
+		this.labelClick$ = new BehaviorSubject(null);
+		// Stream to control whether to use absolute values or signed values
+		this.absoluteValues$ = new BehaviorSubject(true);
+		// Stream to control whether to color nodes by their max values
+		this.colorNodesEnabled$ = new BehaviorSubject(false);
+		// Store node color data (max values per node for coloring)
+		this.nodeColorData$ = new BehaviorSubject(null);
 	}
 
 	updateEdges(subsetB, error = null) {
@@ -25,6 +35,117 @@ export class Architecture extends Component {
 		//this.$error.next(error);
 		// Trigger edge computation with current threshold
 		this.computeEdgesFromSubsetB();
+		// Update node colors with new data
+		this.updateNodeColors(subsetB);
+	}
+
+	updateNodeColors(subsetB) {
+		if (!subsetB) {
+			this.nodeColorData$.next(null);
+			return;
+		}
+
+		const useAbsoluteValues = this.absoluteValues$.getValue();
+		const tokenTypes = ['cls', 'qry', 'sep1', 'doc', 'sep2'];
+		
+		// Collect ALL values first to compute proper extent, then find max per node
+		// This ensures we capture the true range including negative values
+		const allValues = [];
+		const nodeMaxValues = {};
+		
+		Object.entries(subsetB).forEach(([layerKey, layerData]) => {
+			const match = layerKey.match(/encoder\.layer\.(\d+)\.(attention|intermediate)/);
+			if (!match) return;
+			
+			const layerIndex = parseInt(match[1]);
+			const isAttention = match[2] === 'attention';
+			const layerType = isAttention ? 'ATTN' : 'FFN';
+			
+			if (isAttention && Array.isArray(layerData) && layerData[0] && Array.isArray(layerData[0]) && Array.isArray(layerData[0][0])) {
+				// Attention layer: [12 heads, 5 target tokens, 5 source tokens]
+				for (let srcToken = 0; srcToken < 5; srcToken++) {
+					const tokenType = tokenTypes[srcToken];
+					const nodeKey = `L${layerIndex}_${layerType}_${tokenType}`;
+					let maxVal = -Infinity;
+					
+					// Collect all values and find the maximum
+					for (let head = 0; head < layerData.length; head++) {
+						for (let tgtToken = 0; tgtToken < 5; tgtToken++) {
+							if (layerData[head] && layerData[head][tgtToken] && layerData[head][tgtToken][srcToken] !== undefined) {
+								const rawValue = layerData[head][tgtToken][srcToken];
+								allValues.push(rawValue); // Keep original signed value for extent
+								
+								// Find max value (absolute if mode enabled, otherwise signed)
+								if (useAbsoluteValues) {
+									maxVal = Math.max(maxVal, Math.abs(rawValue));
+								} else {
+									maxVal = Math.max(maxVal, rawValue);
+								}
+							}
+						}
+					}
+					
+					if (maxVal !== -Infinity) {
+						nodeMaxValues[nodeKey] = maxVal;
+					}
+				}
+			} else if (!isAttention && Array.isArray(layerData)) {
+				// FFN layer: [5 token types, N neurons each]
+				for (let tokenIdx = 0; tokenIdx < 5; tokenIdx++) {
+					const tokenType = tokenTypes[tokenIdx];
+					const nodeKey = `L${layerIndex}_${layerType}_${tokenType}`;
+					
+					if (layerData[tokenIdx] && Array.isArray(layerData[tokenIdx])) {
+						let maxVal = -Infinity;
+						
+						// Collect all neuron values and find the maximum
+						layerData[tokenIdx].forEach(rawValue => {
+							allValues.push(rawValue);
+							
+							// Find max value (absolute if mode enabled, otherwise signed)
+							if (useAbsoluteValues) {
+								maxVal = Math.max(maxVal, Math.abs(rawValue));
+							} else {
+								maxVal = Math.max(maxVal, rawValue);
+							}
+						});
+						
+						if (maxVal !== -Infinity) {
+							nodeMaxValues[nodeKey] = maxVal;
+						}
+					}
+				}
+			}
+		});
+		
+		// Compute extent from ALL raw values (not just node maxes) to match heatmap behavior
+		if (allValues.length > 0) {
+			let globalMin, globalMax;
+			
+			if (useAbsoluteValues) {
+				// When using absolute values, extent is [0, max]
+				globalMin = 0;
+				globalMax = Math.max(...allValues.map(Math.abs));
+			} else {
+				// When using signed values, extent includes negative values
+				globalMin = Math.min(...allValues);
+				globalMax = Math.max(...allValues);
+			}
+			
+			this.nodeColorData$.next({
+				nodeMaxValues,
+				extent: [globalMin, globalMax]
+			});
+			
+			console.log('[Architecture Colors] Updated node color data:', {
+				nodeCount: Object.keys(nodeMaxValues).length,
+				extent: [globalMin, globalMax],
+				useAbsoluteValues,
+				sampleValues: Object.entries(nodeMaxValues).slice(0, 3)
+			});
+		} else {
+			this.nodeColorData$.next(null);
+		}
 	}
 
 	updatePruningState(pruningOptions) {
@@ -52,6 +173,7 @@ export class Architecture extends Component {
 		const subsetB = this.subsetBData$.getValue();
 		const threshold = this.$threshold.getValue();
 		const pruningState = this.pruningState$.getValue();
+		const useAbsoluteValues = this.absoluteValues$.getValue();
 		
 		if (!subsetB || threshold === null) {
 			this.edges$.next([]);
@@ -60,6 +182,7 @@ export class Architecture extends Component {
 
 		// STEP 1: Collect ALL values across the entire model to determine global cutoff
 		console.log(`---- COLLECTING ALL VALUES FOR GLOBAL THRESHOLD (${threshold * 100}%) ----`);
+		console.log(`Using ${useAbsoluteValues ? 'ABSOLUTE' : 'SIGNED'} values for edge computation`);
 		const allModelValues = [];
 		const allAttentionValues = [];
 		const allFFNValues = [];
@@ -76,7 +199,8 @@ export class Architecture extends Component {
 					for (let srcToken = 0; srcToken < 5; srcToken++) {
 						for (let tgtToken = 0; tgtToken < 5; tgtToken++) {
 							if (layerData[head] && layerData[head][tgtToken] && layerData[head][tgtToken][srcToken] !== undefined) {
-								const value = Math.abs(layerData[head][tgtToken][srcToken]); // Keep Math.abs() for visualization
+								const rawValue = layerData[head][tgtToken][srcToken];
+								const value = useAbsoluteValues ? Math.abs(rawValue) : rawValue;
 								allModelValues.push(value);
 								allAttentionValues.push(value);
 							}
@@ -87,7 +211,7 @@ export class Architecture extends Component {
 				// FFN layer: [5, neurons] - collect all neuron values
 				for (let tokenType = 0; tokenType < 5; tokenType++) {
 					if (layerData[tokenType] && Array.isArray(layerData[tokenType])) {
-						const values = layerData[tokenType].map(v => Math.abs(v)); // Keep Math.abs() for visualization
+						const values = layerData[tokenType].map(v => useAbsoluteValues ? Math.abs(v) : v);
 						allModelValues.push(...values);
 						allFFNValues.push(...values);
 					}
@@ -101,9 +225,16 @@ export class Architecture extends Component {
 		allFFNValues.sort((a, b) => b - a);
 		
 		let globalCutoff = 0;
-		if (threshold > 0 && allModelValues.length > 0) {
-			const cutoffIndex = Math.max(0, Math.floor(allModelValues.length * threshold) - 1);
-			globalCutoff = allModelValues[cutoffIndex];
+		if (allModelValues.length > 0) {
+			if (threshold === 0) {
+				// threshold = 0 means show top 0% of values → cutoff = max value (nothing passes)
+				globalCutoff = allModelValues[0];
+			} else {
+				// threshold > 0: logarithmically mapped (0.0001 to 1), calculate cutoff for top threshold% of values
+				const cutoffIndex = Math.max(0, Math.floor(allModelValues.length * threshold) - 1);
+				// Ensure we have a valid cutoff value; if index calculation results in no values, use the max
+				globalCutoff = allModelValues[cutoffIndex] !== undefined ? allModelValues[cutoffIndex] : allModelValues[0];
+			}
 		}
 
 		// Calculate pruning cutoffs for ATTN and FFN
@@ -111,22 +242,26 @@ export class Architecture extends Component {
 		let attentionPruningCutoff = 0;
 		let ffnPruningCutoff = 0;
 		
-		if (pruningState.enabled) {
-			if (pruningState.thresholds.attention > 0 && allModelValues.length > 0) {
+		if (pruningState.enabled && allModelValues.length > 0) {
+			if (pruningState.thresholds.attention === 0) {
+				attentionPruningCutoff = allModelValues[0]; // Max value
+			} else if (pruningState.thresholds.attention > 0) {
 				const attentionCutoffIndex = Math.max(0, Math.floor(allModelValues.length * pruningState.thresholds.attention) - 1);
-				attentionPruningCutoff = allModelValues[attentionCutoffIndex];
+				attentionPruningCutoff = allModelValues[attentionCutoffIndex] !== undefined ? allModelValues[attentionCutoffIndex] : allModelValues[0];
 			}
 			
-			if (pruningState.thresholds.ffn > 0 && allModelValues.length > 0) {
+			if (pruningState.thresholds.ffn === 0) {
+				ffnPruningCutoff = allModelValues[0]; // Max value
+			} else if (pruningState.thresholds.ffn > 0) {
 				const ffnCutoffIndex = Math.max(0, Math.floor(allModelValues.length * pruningState.thresholds.ffn) - 1);
-				ffnPruningCutoff = allModelValues[ffnCutoffIndex];
+				ffnPruningCutoff = allModelValues[ffnCutoffIndex] !== undefined ? allModelValues[ffnCutoffIndex] : allModelValues[0];
 			}
 		}
 		
 		console.log(`GLOBAL THRESHOLD STATS:`);
 		console.log(`  Total values in model: ${allModelValues.length}`);
 		console.log(`  Value range: ${allModelValues[allModelValues.length-1].toFixed(6)} to ${allModelValues[0].toFixed(6)}`);
-		console.log(`  Threshold: ${threshold * 100}% = ${Math.floor(allModelValues.length * threshold)} values`);
+		console.log(`  Threshold: ${(threshold * 100).toFixed(4)}% = ${Math.floor(allModelValues.length * threshold)} values`);
 		console.log(`  Global cutoff value: ${globalCutoff.toFixed(6)}`);
 		console.log(`  Values above cutoff: ${allModelValues.filter(v => v >= globalCutoff).length}`);
 		
@@ -163,17 +298,16 @@ export class Architecture extends Component {
 						const headValues = [];
 						for (let head = 0; head < layerData.length; head++) {
 							if (layerData[head] && layerData[head][tgtToken] && layerData[head][tgtToken][srcToken] !== undefined) {
-								headValues.push(Math.abs(layerData[head][tgtToken][srcToken])); // Keep Math.abs() for visualization
+								const rawValue = layerData[head][tgtToken][srcToken];
+								headValues.push(useAbsoluteValues ? Math.abs(rawValue) : rawValue);
 							}
 						}
 						
-						if (headValues.length > 0) {
-							// Count how many heads exceed the GLOBAL cutoff
-							// If threshold is 0, show all edges (count = total)
-							const count = threshold > 0 ? headValues.filter(v => v >= globalCutoff).length : headValues.length;
-							const proportion = count / headValues.length;
-							
-							// Debug logging 
+					if (headValues.length > 0) {
+						// Count how many heads exceed the GLOBAL cutoff
+						// If threshold is 0, show no edges (count = 0)
+						const count = threshold > 0 ? headValues.filter(v => v >= globalCutoff).length : 0;
+						const proportion = count / headValues.length;							// Debug logging 
 							console.log(`${layerKey} (ATTN): ${tokenTypes[srcToken]} → ${tokenTypes[tgtToken]}`);
 							console.log(`  Head values: [${headValues.slice(0, 3).map(v => v.toFixed(4)).join(', ')}...] (${headValues.length} total)`);
 							console.log(`  Global cutoff: ${globalCutoff.toFixed(6)}, Count above: ${count}/${headValues.length}, Proportion: ${proportion.toFixed(3)}`);
@@ -206,14 +340,12 @@ export class Architecture extends Component {
 				// FFN layer: [5, neurons] - create edges from FFN to next layer's ATTN
 				for (let tokenType = 0; tokenType < 5; tokenType++) {
 					if (layerData[tokenType] && Array.isArray(layerData[tokenType])) {
-						const neuronValues = layerData[tokenType].map(v => Math.abs(v)); // Keep Math.abs() for visualization
-						if (neuronValues.length > 0) {
-							// Count how many neurons exceed the GLOBAL cutoff
-							// If threshold is 0, show all edges (count = total)
-							const count = threshold > 0 ? neuronValues.filter(v => v >= globalCutoff).length : neuronValues.length;
-							const proportion = count / neuronValues.length;
-							
-							// Debug logging
+					const neuronValues = layerData[tokenType].map(v => useAbsoluteValues ? Math.abs(v) : v);
+					if (neuronValues.length > 0) {
+						// Count how many neurons exceed the GLOBAL cutoff
+						// If threshold is 0, show no edges (count = 0)
+						const count = threshold > 0 ? neuronValues.filter(v => v >= globalCutoff).length : 0;
+						const proportion = count / neuronValues.length;							// Debug logging
 							console.log(`${layerKey} (FFN): ${tokenTypes[tokenType]}`);
 							console.log(`  Neuron values: [${neuronValues.slice(0, 3).map(v => v.toFixed(4)).join(', ')}...] (${neuronValues.length} total)`);
 							console.log(`  Global cutoff: ${globalCutoff.toFixed(6)}, Count above: ${count}/${neuronValues.length}, Proportion: ${proportion.toFixed(3)}`);
@@ -282,6 +414,8 @@ export class Architecture extends Component {
 		})));
 
 		this.edges$.next(edges);
+		// Also emit the global cutoff so other components (e.g., histogram/ECDF) can render consistent shading
+		this.globalCutoff$.next(globalCutoff);
 		
 		// Also emit the computed pruning cutoffs for other components to use
 		this.pruningCutoffs$.next({
@@ -303,7 +437,10 @@ export class Architecture extends Component {
 				subsetBData$: this.subsetBData$,
 				edges$: this.edges$,
 				error$: this.$error,
-				pruningState$: this.pruningState$
+				pruningState$: this.pruningState$,
+				labelClick$: this.labelClick$,
+				colorNodesEnabled$: this.colorNodesEnabled$,
+				nodeColorData$: this.nodeColorData$
 			},
 		});
 		return () => unmount(app);

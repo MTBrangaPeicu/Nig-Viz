@@ -4,10 +4,12 @@ import '@marcellejs/layouts/dist/marcelle-layouts.css';
 import * as core from '@marcellejs/core';
 import * as widgets from '@marcellejs/gui-widgets';
 import { dashboard } from '@marcellejs/layouts';
-import { nigtable, nigModel, architecture, betterNumber, betterText, pruner, violinplot} from './components';
+import { nigtable, nigModel, architecture, betterNumber, betterText, pruner, violinplot, subsetButtons as subsetButtonsComponent, nigHistogram as nigHistogramFactory, logThresholdSlider as logThresholdSliderFactory } from './components';
 import { map } from 'rxjs';
+import { analyzeNig } from './utils/analyze-nig';
 
-const store = core.dataStore('https://marcelle.lisn.upsaclay.fr/nig-viz/api/');
+const store = core.dataStore('http://localhost:3030');
+//const store = core.dataStore('https://marcelle.lisn.upsaclay.fr/nig-viz/api/');
 
 // Create separate models for IG and NIG connecting to Python service
 const igModelInstance = nigModel(store, 'predictions');
@@ -24,30 +26,102 @@ queryInput.title = 'Query';
 queryInput.samples = []; // Initialize samples as an empty array
 
 const passageInput = betterText('', []);
-passageInput.title = 'Passage';
+passageInput.title = 'Passage (required)';
+
+// Optional second passage
+const passageInput2 = betterText('', []);
+passageInput2.title = 'Passage 2 (optional)';
 
 // Fetch query samples from the backend
 const datasetService = store.service('msmarco-samples');
+let samplesReady = false;
+// Ensure these are defined before any subscriptions that reference them
+let selectedQueryId = null; // Store the selected query ID
+let currentNigId = null; // Store the current NIG result ID for threshold updates
+let lastNIGRequestInputs = null; // Capture inputs at submit time for snapshot metadata
+// Keep a global extent [min,max] of signed IG/NIG values for consistent histogram domain
+let globalNigExtent = null;
+let globalNigAbsMax = null;
+// Keep global extent for activation values as well
+let globalAttnActivationExtent = null;
+let globalFFNActivationExtent = null;
 datasetService.on('patched', (doc) => {
   if (doc.status === 'success' && doc.samples) {
     const queries = doc.samples.map((sample) => sample.query); // Extract 'query' field from samples
     queryInput.updateOptions(queries); // Use updateOptions to populate dropdown options
     queryInput.samples = doc.samples; // Attach samples to queryInput for later use
     console.log('Query options updated:', queries); // Debug log to verify options
+    samplesReady = true;
+    // Auto-select first query if none is selected yet
+    try {
+      const current = queryInput.$value && queryInput.$value.getValue ? queryInput.$value.getValue() : '';
+      // Pick current if still present; else pick first available
+      const chosen = current && queries.includes(current) ? current : (queries[0] || '');
+      if (chosen) {
+        // Ensure value is set to trigger downstream updates (even if same string)
+        queryInput.$value.next(chosen);
+        // Refresh passage options immediately from new samples
+        const selectedSample = doc.samples.find((s) => s.query === chosen);
+        if (selectedSample) {
+          const passages = selectedSample.passages.map((p) => p.text);
+          passageInput.updateOptions(passages);
+          passageInput2.updateOptions(passages);
+        } else {
+          passageInput.updateOptions([]);
+          passageInput2.updateOptions([]);
+        }
+      }
+    } catch {}
+  }
+  // Update subset button options dynamically if levels are provided
+  if (doc.status === 'success' && Array.isArray(doc.levels)) {
+    const opts = [...doc.levels.map(l => `Rel=${l}`), 'Random'];
+    subsetButtons.setOptions(opts);
+  }
+  // If backend returns passages for a specific query, update passage suggestions only
+  if (doc.status === 'success' && Array.isArray(doc.passages)) {
+    const passages = doc.passages.map(p => p.text);
+    passageInput.updateOptions(passages);
+    passageInput2.updateOptions(passages);
   }
 });
 
-// Request query samples
-datasetService.create({ n: 10 });
+// Dynamic subset buttons component
+const subsetButtons = subsetButtonsComponent(['Random']);
+subsetButtons.title = 'Qrels subsets';
+subsetButtons.$value.subscribe((lbl) => {
+  if (!lbl) return;
+  // If a query is currently selected, request passages for that query only
+  const currentQuery = queryInput.$value.getValue();
+  // Clear histogram while new subset is loading
+  try {
+    lastHistogramState = { values: null, type: null };
+    nigHistogram.$options.next({ values: null });
+  } catch {}
+  // Prefer stored selectedQueryId if available
+  if (selectedQueryId) {
+    datasetService.create({ subset: lbl, query_id: selectedQueryId });
+    return;
+  }
+  // Fallback: try to find query id from current sample cache
+  if (currentQuery && queryInput.samples && queryInput.samples.length) {
+    const sample = queryInput.samples.find(s => s.query === currentQuery);
+    if (sample && sample.query_id) {
+      datasetService.create({ subset: lbl, query_id: sample.query_id });
+      return;
+    }
+  }
+  // Fallback: request full sample refresh if no current query id
+  datasetService.create({ n: 10, subset: lbl });
+});
 
-let selectedQueryId = null; // Store the selected query ID
-let currentNigId = null; // Store the current NIG result ID for threshold updates
-let lastNIGRequestInputs = null; // Capture inputs at submit time for snapshot metadata
+// Initial request
+datasetService.create({ n: 10, subset: 'Random' });
 
 // Handle query selection
 queryInput.$value.subscribe((selectedQuery) => {
-  if (!queryInput.samples || queryInput.samples.length === 0) {
-    console.error('Query samples are not available.');
+  if (!samplesReady || !queryInput.samples || queryInput.samples.length === 0) {
+    // Samples not ready yet; ignore early emissions
     return;
   }
 
@@ -55,11 +129,13 @@ queryInput.$value.subscribe((selectedQuery) => {
   if (selectedSample) {
     selectedQueryId = selectedSample.query_id; // Store the selected query ID
     const passages = selectedSample.passages.map((passage) => passage.text); // Extract passage texts
-    passageInput.updateOptions(passages); // Update passageInput options with relevant passages
+    passageInput.updateOptions(passages);
+    passageInput2.updateOptions(passages);
     console.log('Passage options updated:', passages); // Debug log to verify passages
   } else {
-    console.error('Selected query not found in samples.');
-    passageInput.updateOptions([]); // Clear passage options if no matching query is found
+  // Selected query not found (possibly stale); ignore quietly
+    passageInput.updateOptions([]);
+    passageInput2.updateOptions([]);
   }
 });
 
@@ -92,6 +168,14 @@ violinPlotComponent.title = 'NIG Distribution (Violin Plot)';
 
 const architectureComponent = architecture();
 architectureComponent.title = 'Architecture Grid';
+
+// Subscribe to table selection requests and update architecture
+tableNIGS.selectionRequest$.subscribe((selection) => {
+  if (selection && architectureComponent.$selection) {
+    console.log('[Index] Updating architecture selection from table:', selection);
+    architectureComponent.$selection.next(selection);
+  }
+});
 
 // ---------------- NIG SNAPSHOT CACHE (Local) ----------------
 // Each snapshot stores: id, timestamp, query, passage, data (subset_b)
@@ -143,6 +227,12 @@ function loadNIGSnapshotData(snapshot) {
   const nigData = snapshot.data;
   console.log('[SNAPSHOT LOAD] Begin load id=', snapshot.id, 'layers=', Object.keys(nigData).length);
 
+  // Reset architecture selection when loading snapshot
+  if (architectureComponent && architectureComponent.$selection) {
+    architectureComponent.$selection.next({ source: null, target: null });
+    console.log('[SNAPSHOT LOAD] Reset architecture selection');
+  }
+
   // Restore query input (ensure option list contains it)
   if (snapshot.query) {
     // If query not present, append to options
@@ -178,10 +268,95 @@ function loadNIGSnapshotData(snapshot) {
   try {
     if (nigModelInstance?.$data?.next) {
       console.log('[SNAPSHOT LOAD] Injecting into model stream');
-      nigModelInstance.$data.next({ _id: `snapshot-${snapshot.id}`, __fromSnapshot: true, result: { subset_b: nigData } });
+      const resultPayload = { subset_b: nigData };
+      if (snapshot.activations) {
+        if (snapshot.activations.attention) resultPayload.attn_activations = snapshot.activations.attention;
+        if (snapshot.activations.ffn) resultPayload.ffn_activations = snapshot.activations.ffn;
+      }
+      nigModelInstance.$data.next({ _id: `snapshot-${snapshot.id}`, __fromSnapshot: true, result: resultPayload });
     }
   } catch (e) {
     console.warn('[NIG SNAPSHOTS] Failed to inject snapshot into model instance:', e);
+  }
+
+  // Initialize histogram immediately from snapshot (in case other subscriptions haven't reacted yet)
+  try {
+    const sVals = (thresholdSlider && thresholdSlider.$values && typeof thresholdSlider.$values.getValue === 'function'
+      ? thresholdSlider.$values.getValue()
+      : [0.5]);
+    const threshold = Math.pow(10, -4 + 4 * sVals[0]); // Logarithmic mapping
+    // Compute extent and absMax for the snapshot payload
+    const statsFrom = (value) => {
+      let min = Infinity, max = -Infinity, maxAbs = 0;
+      const visit = (v) => {
+        if (Array.isArray(v)) {
+          for (const x of v) visit(x);
+        } else if (v != null && typeof v === 'object') {
+          for (const k in v) visit(v[k]);
+        } else if (Number.isFinite(v)) {
+          if (v < min) min = v;
+          if (v > max) max = v;
+          const a = Math.abs(v);
+          if (a > maxAbs) maxAbs = a;
+        }
+      };
+      visit(value);
+      return { extent: (isFinite(min) && isFinite(max) ? [min, max] : null), maxAbs: (maxAbs || null) };
+    };
+    const stats = statsFrom(nigData);
+    globalNigExtent = stats.extent;
+    globalNigAbsMax = stats.maxAbs;
+    
+    // Update threshold slider with global extent
+    if (thresholdSlider && thresholdSlider.$options) {
+      thresholdSlider.$options.next({ globalExtent: globalNigExtent });
+    }
+    
+    // Compute global extent for activation values from snapshot
+    if (snapshot.activations) {
+      if (snapshot.activations.attention) {
+        const attnStats = statsFrom(snapshot.activations.attention);
+        globalAttnActivationExtent = attnStats.extent;
+        console.log('[SNAPSHOT LOAD] Global ATTN activation extent:', globalAttnActivationExtent);
+      }
+      if (snapshot.activations.ffn) {
+        const ffnStats = statsFrom(snapshot.activations.ffn);
+        globalFFNActivationExtent = ffnStats.extent;
+        console.log('[SNAPSHOT LOAD] Global FFN activation extent:', globalFFNActivationExtent);
+      }
+    }
+    
+    const useAbsoluteValues = absoluteValuesToggle.$checked.getValue ? absoluteValuesToggle.$checked.getValue() : true;
+    lastHistogramState = { values: nigData, type: null };
+  nigHistogram.$options.next({ ...lastHistogramState, threshold, scale: 'symlog', extent: globalNigExtent, absMax: globalNigAbsMax, useAbsoluteValues });
+  } catch (e) {
+    console.warn('[SNAPSHOT LOAD] Failed to initialize histogram from snapshot:', e);
+  }
+
+  // Analyze snapshot distribution
+  try {
+    const stats = analyzeNig(nigData);
+    console.groupCollapsed('[NIG ANALYZE] Snapshot distribution summary');
+    console.table({
+      n: stats.n,
+      min: stats.min,
+      q25: stats.quantiles?.q25,
+      median: stats.quantiles?.q50,
+      q75: stats.quantiles?.q75,
+      max: stats.max,
+      mean: stats.mean,
+      std: stats.std,
+      skew: stats.skew,
+      kurt: stats.kurt,
+      pPos: stats.proportions?.pPos,
+      pNeg: stats.proportions?.pNeg,
+      pZero: stats.proportions?.pZero,
+      fdBins: stats.fd?.bins,
+    });
+    console.log('Visualization hints:', stats.recommendation);
+    console.groupEnd();
+  } catch (e) {
+    console.warn('[NIG ANALYZE] Failed to analyze snapshot:', e);
   }
 
   // If snapshot contains previous selection metadata, re-emit it to trigger normal reactive recomputation
@@ -268,7 +443,7 @@ function getBaselineType(selectedBaseline) {
 submitQuery.$click.subscribe(() => {
   igModelInstance.predict({
     query: queryInput.$value.getValue(),
-    passage: passageInput.$value.getValue(),
+    passage: passageInput.$value.getValue() + (passageInput2.$value.getValue() ? (' \n\n' + passageInput2.$value.getValue()) : ''),
     //batch_size: batchSizeInput.$value.getValue(),
     num_reps: numRepsInput.$value.getValue(),
     baseline_type: getBaselineType(baselineDropdown.$value.getValue()),
@@ -278,6 +453,12 @@ submitQuery.$click.subscribe(() => {
 
 // NIG Prediction submit
 submitNIG.$click.subscribe(() => {
+  // Reset architecture selection when calculating new NIGs
+  if (architectureComponent && architectureComponent.$selection) {
+    architectureComponent.$selection.next({ source: null, target: null });
+    console.log('[Calculate NIGs] Reset architecture selection');
+  }
+  
   // Capture inputs at click time to ensure snapshot metadata matches the request
   lastNIGRequestInputs = {
     query: queryInput.$value.getValue() || '',
@@ -288,7 +469,7 @@ submitNIG.$click.subscribe(() => {
 
   nigModelInstance.predict({
     query: queryInput.$value.getValue(),
-    passage: passageInput.$value.getValue(),
+    passage: passageInput.$value.getValue() + (passageInput2.$value.getValue() ? (' \n\n' + passageInput2.$value.getValue()) : ''),
    //batch_size: batchSizeInput.$value.getValue(),
     num_reps: numRepsInput.$value.getValue(),
     baseline_type: getBaselineType(baselineDropdown.$value.getValue()),
@@ -322,6 +503,10 @@ function createSnapshotFromDoc(doc) {
     baselineLabel: baselineDropdown.$value.getValue(),
     numReps: numRepsInput.$value.getValue(),
   };
+  // Capture activations if available under various backend keys
+  const r = doc.result;
+  const attnActs = r.attn_activations || r.activations_attn || r.attention_probs || null;
+  const ffnActs = r.ffn_activations || r.activations_ffn || r.activations || null;
   return {
     version: 2,
     id: doc._id,
@@ -331,6 +516,7 @@ function createSnapshotFromDoc(doc) {
     baselineLabel: meta.baselineLabel,
     numReps: meta.numReps,
     data: nig,
+    activations: { attention: attnActs, ffn: ffnActs },
   };
 }
 
@@ -351,6 +537,81 @@ nigModelInstance.$data.subscribe(doc => {
   if (!doc.result.subset_b) return;
   const nig = doc.result.subset_b;
   console.log('[MODEL STREAM] subset_b size (layers)=', Object.keys(nig).length);
+
+  // Compute global extent once per result
+  try {
+    const computeExtent = (value) => {
+      let min = Infinity, max = -Infinity;
+      let maxAbs = 0;
+      const visit = (v) => {
+        if (Array.isArray(v)) {
+          for (const x of v) visit(x);
+        } else if (v != null && typeof v === 'object') {
+          for (const k in v) visit(v[k]);
+        } else if (Number.isFinite(v)) {
+          if (v < min) min = v;
+          if (v > max) max = v;
+          const a = Math.abs(v);
+          if (a > maxAbs) maxAbs = a;
+        }
+      };
+      visit(value);
+      const extent = isFinite(min) && isFinite(max) ? [min, max] : null;
+      return { extent, maxAbs: maxAbs || null };
+    };
+    const stats = computeExtent(nig);
+    globalNigExtent = stats.extent;
+    globalNigAbsMax = stats.maxAbs;
+    console.log('[MODEL STREAM] Global NIG extent:', globalNigExtent, 'absMax:', globalNigAbsMax);
+    
+    // Update threshold slider with global extent
+    if (thresholdSlider && thresholdSlider.$options) {
+      thresholdSlider.$options.next({ globalExtent: globalNigExtent });
+    }
+    
+    // Compute global extent for activation values
+    const r = doc.result;
+    const attnActs = r.attn_activations || r.activations_attn || r.attention_probs || null;
+    const ffnActs = r.ffn_activations || r.activations_ffn || r.activations || null;
+    if (attnActs) {
+      const attnStats = computeExtent(attnActs);
+      globalAttnActivationExtent = attnStats.extent;
+      console.log('[MODEL STREAM] Global ATTN activation extent:', globalAttnActivationExtent);
+    }
+    if (ffnActs) {
+      const ffnStats = computeExtent(ffnActs);
+      globalFFNActivationExtent = ffnStats.extent;
+      console.log('[MODEL STREAM] Global FFN activation extent:', globalFFNActivationExtent);
+    }
+  } catch (e) {
+    console.warn('[NIG] Failed to compute extent:', e);
+  }
+
+  // Analyze live computation distribution
+  try {
+    const stats = analyzeNig(nig);
+    console.groupCollapsed('[NIG ANALYZE] Live distribution summary');
+    console.table({
+      n: stats.n,
+      min: stats.min,
+      q25: stats.quantiles?.q25,
+      median: stats.quantiles?.q50,
+      q75: stats.quantiles?.q75,
+      max: stats.max,
+      mean: stats.mean,
+      std: stats.std,
+      skew: stats.skew,
+      kurt: stats.kurt,
+      pPos: stats.proportions?.pPos,
+      pNeg: stats.proportions?.pNeg,
+      pZero: stats.proportions?.pZero,
+      fdBins: stats.fd?.bins,
+    });
+    console.log('Visualization hints:', stats.recommendation);
+    console.groupEnd();
+  } catch (e) {
+    console.warn('[NIG ANALYZE] Failed to analyze live data:', e);
+  }
 
   // Snapshot only if this is a fresh computation (not an injected snapshot)
   if (!doc.__fromSnapshot) {
@@ -375,7 +636,13 @@ nigModelInstance.$data.subscribe(doc => {
 
   if (layers.length) {
     // Update table for first layer - but don't show data initially, just indicate that NIG data exists
-    tableNIGS.$options.next({ hasNigData: true, layer: null, values: null });
+    tableNIGS.$options.next({ hasNigData: true, layer: null, values: null, summary: 'Select a layer/token above to see details', globalNigExtent });
+  // Push full distribution to histogram
+  const s = thresholdSlider.$value.getValue ? thresholdSlider.$value.getValue() : 0.5;
+  const threshold = Math.pow(10, -4 + 4 * s); // Logarithmic mapping
+  const useAbsoluteValues = absoluteValuesToggle.$checked.getValue ? absoluteValuesToggle.$checked.getValue() : true;
+  lastHistogramState = { values: nig, type: null };
+  nigHistogram.$options.next({ ...lastHistogramState, threshold, scale: 'symlog', extent: globalNigExtent, absMax: globalNigAbsMax, useAbsoluteValues });
   }
 
   // Feed subset_b into the architecture component for counting/visualization
@@ -393,45 +660,175 @@ layerDropdown.$value.subscribe(layer => {
       layer,
       type: null, // No layer type for dropdown
       tokenType: null, // No token type for dropdown
-      values: nig[layer],
+  values: nig[layer],
+  summary: `Layer ${layer}`,
+      globalNigExtent
     });
+  const sv = (thresholdSlider && thresholdSlider.$values && typeof thresholdSlider.$values.getValue === 'function'
+    ? thresholdSlider.$values.getValue()
+    : [0.5]);
+  const threshold = Math.pow(10, -4 + 4 * sv[0]); // Logarithmic mapping
+  const useAbsoluteValues = absoluteValuesToggle.$checked.getValue ? absoluteValuesToggle.$checked.getValue() : true;
+  lastHistogramState = { values: nig[layer], type: null };
+  nigHistogram.$options.next({ ...lastHistogramState, threshold, scale: 'symlog', extent: globalNigExtent, absMax: globalNigAbsMax, useAbsoluteValues });
   } else if (nig) {
-    tableNIGS.$options.next({ hasNigData: true, error: 'Invalid layer or no data' });
+    tableNIGS.$options.next({ hasNigData: true, error: 'Invalid layer or no data', globalNigExtent });
   }
 });
 
-// Log-focused threshold slider Option 1:
-// Raw slider value s ∈ [0,1]; s = 0 => threshold = 0 (show all)
-// For s > 0: exponent e = -4 + 4*s  (maps to e ∈ [-4,0]) and threshold = 10^e (1e-4 .. 1)
-// This compresses unused ultra-small range while keeping intuitive 0..1 control.
-const thresholdSlider = widgets.slider({
-  values: [0.5],           // midpoint ≈ 10^(-4 + 4*0.5) = 10^-2 = 0.01
-  min: 0,
-  max: 1,
-  step: 0.01,
-  formatter: (s) => {
-    if (s === 0) return '0';
-    const e = -4 + 4 * s;
-    const v = Math.pow(10, e);
-    if (v === 1) return '1.000';
-    if (v >= 0.1) return v.toFixed(3);
-    if (v >= 0.01) return v.toFixed(3);
-  // For 0.001 <= v < 0.01 use 4 decimals, for 0.0001 <= v < 0.001 use 5 decimals
-  if (v >= 0.001) return v.toFixed(4);
-  return v.toFixed(5);
+// Toggle for absolute values mode
+const absoluteValuesToggle = widgets.toggle(true);
+absoluteValuesToggle.title = 'Use Absolute Values';
+absoluteValuesToggle.$checked.subscribe((checked) => {
+  absoluteValuesToggle.$text.next(checked ? 'Enabled' : 'Disabled');
+  console.log('[Absolute Values] Mode:', checked ? 'Absolute' : 'Signed');
+  
+  // Reset architecture selection when toggling absolute values
+  if (architectureComponent && architectureComponent.$selection) {
+    architectureComponent.$selection.next({ source: null, target: null });
+    console.log('[Absolute Values] Reset architecture selection');
+  }
+  
+  // Update architecture component's absolute values stream and recompute edges
+  if (architectureComponent && architectureComponent.absoluteValues$) {
+    architectureComponent.absoluteValues$.next(checked);
+    // Trigger recomputation of edges with new absolute values mode
+    architectureComponent.computeEdgesFromSubsetB();
+  }
+  
+  // Update table component's absolute values stream
+  if (tableNIGS && tableNIGS.absoluteValues$) {
+    tableNIGS.absoluteValues$.next(checked);
+  }
+
+  // Update histogram with new absolute values mode
+  const currentGlobalCutoff = architectureComponent.globalCutoff$.getValue();
+  const s = thresholdSlider.$value.getValue ? thresholdSlider.$value.getValue() : 0.5;
+  const threshold = Math.pow(10, -4 + 4 * s); // Logarithmic mapping
+  nigHistogram.$options.next({
+    ...lastHistogramState,
+    threshold,
+    scale: 'symlog',
+    extent: globalNigExtent,
+    absMax: globalNigAbsMax,
+    globalCutoff: currentGlobalCutoff,
+    useAbsoluteValues: checked
+  });
+});
+
+// Toggle for architecture node colors
+const architectureColorsToggle = widgets.toggle(false);
+architectureColorsToggle.title = 'Architecture Node Colors';
+architectureColorsToggle.$checked.subscribe((checked) => {
+  architectureColorsToggle.$text.next(checked ? 'Enabled' : 'Disabled');
+  console.log('[Architecture Colors] Mode:', checked ? 'Enabled' : 'Disabled');
+  
+  // Update architecture component's color mode stream
+  if (architectureComponent && architectureComponent.colorNodesEnabled$) {
+    architectureComponent.colorNodesEnabled$.next(checked);
+    // Trigger node color update with current NIG data
+    const doc = nigModelInstance.$data.getValue();
+    const nig = doc && doc.result && doc.result.subset_b;
+    if (nig) {
+      architectureComponent.updateNodeColors(nig);
+    }
   }
 });
+
+// Threshold slider with logarithmic mapping:
+// Raw slider value s ∈ [0,1] maps to threshold:
+// s = 0 → threshold = 0 (0% - show nothing, cutoff = max value)
+// s > 0 → threshold = 10^(-4 + 4*s) (logarithmic: 0.01% to 100%)
+//   s = 0.01 → ~0.01%, s = 0.5 → ~1%, s = 1 → 100%
+// Labels show percentages for intuitive UX, but mapping is logarithmic for precision
+const thresholdSlider = logThresholdSliderFactory(0.5);
 thresholdSlider.title = 'Threshold for NIG Values';
 
 // Small descriptive text shown under the slider explaining the measurement
-const thresholdInfo = widgets.text('Select the fraction of highest-magnitude NIG values to visualize (log-scaled control). 0 = show none, 0.01 ≈ top 1%, 1 = show all (100%).');
+const thresholdInfo = widgets.text('Select the percentage of highest-magnitude NIG values to visualize. 0% shows nothing, 100% shows all values.');
 thresholdInfo.title = '';
 
+// Histogram (log-x) under the threshold slider, and static log tick labels
+const nigHistogram = nigHistogramFactory();
+nigHistogram.title = '';
+
+// Keep last histogram payload to refresh on threshold change
+let lastHistogramState = { values: null, type: null };
+
+// Histogram scale fixed to symlog
+
+// Wire up the reactive globalCutoff stream to components (single source of truth)
+architectureComponent.globalCutoff$.subscribe((cutoff) => {
+  nigHistogram.$globalCutoff.next(cutoff);
+  tableNIGS.$globalCutoff.next(cutoff);
+});
+
 // Subscribe to slider value changes and propagate actual threshold
-thresholdSlider.$values.subscribe(([s]) => {
+thresholdSlider.$value.subscribe((s) => {
+  // Special case: s = 0 means show nothing (0%)
+  // Otherwise: map logarithmically s ∈ (0,1] → threshold = 10^(-4 + 4*s) ∈ [0.0001, 1]
   const threshold = s === 0 ? 0 : Math.pow(10, -4 + 4 * s);
-  console.log('[Threshold Slider] raw slider:', s, 'mapped threshold fraction:', threshold);
+  console.log('[Threshold Slider] slider:', s, '=> threshold:', threshold, '(show top', s === 0 ? '0%' : (threshold * 100).toFixed(4) + '%', 'of values)');
   architectureComponent.updateThreshold(threshold);
+  // Histogram cutoff will automatically update via globalCutoff$ stream
+  if (lastHistogramState.values) {
+    const useAbsoluteValues = absoluteValuesToggle.$checked.getValue ? absoluteValuesToggle.$checked.getValue() : true;
+    nigHistogram.$options.next({ ...lastHistogramState, threshold, scale: 'symlog', extent: globalNigExtent, absMax: globalNigAbsMax, useAbsoluteValues });
+  }
+});
+
+// Bootstrap: if model already has NIG data (e.g., snapshot auto-loaded before histogram existed),
+// initialize the histogram now to mirror the architecture update behavior.
+try {
+  const bootstrapDoc = nigModelInstance.$data.getValue && nigModelInstance.$data.getValue();
+  const bootstrapNig = bootstrapDoc && bootstrapDoc.result && bootstrapDoc.result.subset_b;
+  if (bootstrapNig) {
+    const s0 = thresholdSlider.$value.getValue ? thresholdSlider.$value.getValue() : 0.5;
+    const thr0 = Math.pow(10, -4 + 4 * s0); // Logarithmic mapping
+    // Compute extent from bootstrap data
+    const computeExtent = (value) => {
+      let min = Infinity, max = -Infinity, maxAbs = 0;
+      const visit = (v) => {
+        if (Array.isArray(v)) {
+          for (const x of v) visit(x);
+        } else if (v != null && typeof v === 'object') {
+          for (const k in v) visit(v[k]);
+        } else if (Number.isFinite(v)) {
+          if (v < min) min = v;
+          if (v > max) max = v;
+          const a = Math.abs(v);
+          if (a > maxAbs) maxAbs = a;
+        }
+      };
+      visit(value);
+      return { extent: (isFinite(min) && isFinite(max) ? [min, max] : null), maxAbs: (maxAbs || null) };
+    };
+    const stats0 = computeExtent(bootstrapNig);
+    globalNigExtent = stats0.extent;
+    globalNigAbsMax = stats0.maxAbs;
+    const useAbsoluteValues = absoluteValuesToggle.$checked.getValue ? absoluteValuesToggle.$checked.getValue() : true;
+    lastHistogramState = { values: bootstrapNig, type: null };
+  nigHistogram.$options.next({ ...lastHistogramState, threshold: thr0, scale: 'symlog', extent: globalNigExtent, absMax: globalNigAbsMax, useAbsoluteValues });
+  }
+} catch {}
+
+// Keep histogram synced with table only when there is no active selection context
+tableNIGS.$options.subscribe((opts) => {
+  if (!opts) return;
+  // If a selection-driven table is active (ATTN/FFN), don't override histogram here
+  if (opts.type) return;
+  const doc = nigModelInstance.$data.getValue();
+  const allNig = doc && doc.result && doc.result.subset_b;
+  const s = thresholdSlider.$value.getValue ? thresholdSlider.$value.getValue() : 0.5;
+  const threshold = Math.pow(10, -4 + 4 * s); // Logarithmic mapping
+  const useAbsoluteValues = absoluteValuesToggle.$checked.getValue ? absoluteValuesToggle.$checked.getValue() : true;
+  if (allNig) {
+    lastHistogramState = { values: allNig, type: null };
+  nigHistogram.$options.next({ ...lastHistogramState, threshold, scale: 'symlog', extent: globalNigExtent, absMax: globalNigAbsMax, useAbsoluteValues });
+  } else {
+    lastHistogramState = { values: null, type: null };
+    nigHistogram.$options.next({ values: null });
+  }
 });
 
 // Handle selections from the architecture grid
@@ -440,7 +837,21 @@ architectureComponent.$selection.subscribe(sel => {
   const { source, target } = sel || {};
   // Clear table if incomplete or empty selection
   if (!source || !target) {
-    tableNIGS.$options.next({ ...tableNIGS.$options.getValue(), values: null });
+    // Clear table to a non-selection state
+    tableNIGS.$options.next({ hasNigData: true, layer: null, type: null, tokenType: null, values: null, summary: 'Select a layer/token above to see details', globalNigExtent });
+    // Reset histogram/ECDF to total distribution
+    const doc0 = nigModelInstance.$data.getValue();
+    const allNig0 = doc0 && doc0.result && doc0.result.subset_b;
+    const s0 = thresholdSlider.$value.getValue ? thresholdSlider.$value.getValue() : 0.5;
+    const thr0 = Math.pow(10, -4 + 4 * s0); // Logarithmic mapping
+    const useAbsoluteValues = absoluteValuesToggle.$checked.getValue ? absoluteValuesToggle.$checked.getValue() : true;
+    if (allNig0) {
+      lastHistogramState = { values: allNig0, type: null };
+      nigHistogram.$options.next({ ...lastHistogramState, threshold: thr0, scale: 'symlog', extent: globalNigExtent, absMax: globalNigAbsMax, useAbsoluteValues });
+    } else {
+      lastHistogramState = { values: null, type: null };
+      nigHistogram.$options.next({ values: null });
+    }
     return;
   }
 
@@ -468,6 +879,25 @@ architectureComponent.$selection.subscribe(sel => {
   const src = source;
   const tgt = target;
   let layerKey, type, tokenType, values;
+  let activations = null; // optional FFN activations row
+
+  function formatLayerTitle(layerKey, type, aToken, bToken, orientation) {
+    // Derive Lx from layerKey
+    let L = '?';
+    try {
+      const m = String(layerKey || '').match(/layer\.(\d+)/);
+      if (m) L = Number(m[1]);
+    } catch {}
+    const T = type || (String(layerKey || '').includes('attention') ? 'ATTN' : 'FFN');
+    if (T === 'ATTN') {
+      const a = aToken || '?';
+      const b = bToken || '?';
+      const map = orientation === 'tgtsToSrcs' ? `${b} → ${a}` : `${a} → ${b}`;
+      return `L${L} ${T} table ${map}`;
+    }
+    // FFN: single token focus
+    return `L${L} ${T} table ${aToken || ''}`.trim();
+  }
 
   if (src.type === 'ATTN' && tgt.type === 'FFN' && src.layer === tgt.layer) {
     layerKey = attnLayerKey(src.layer);
@@ -476,8 +906,36 @@ architectureComponent.$selection.subscribe(sel => {
     const layerData = nig[layerKey]; // shape (12,5,5) [head][tgt][src]
     const tokenIndex = tokenTypes.indexOf(tokenType);
     if (layerData && tokenIndex !== -1) {
+      // srcToTgts: fix source row, list across target columns
+      // Need to extract src token's row across all targets
+      // layerData[head][tgt][src] so we map over tgt for fixed src
       values = layerData.map(head => head.map(row => row[tokenIndex])); // (12,5)
     }
+    // Optional ATTN activations
+    try {
+      const result = nigModelInstance.$data.getValue()?.result;
+      console.log('[UI] result keys:', Object.keys(result||{}));
+      const candidates = [result?.attn_activations, result?.activations_attn, result?.attention, result?.attention_probs];
+      const srcMap = candidates.find(x => x && x[layerKey]);
+      if (srcMap) {
+        const raw = srcMap[layerKey]; // expect (12,5,5)
+        if (Array.isArray(raw)) {
+          var attnActivations = raw.map(head => head[tokenIndex]); // (12,5)
+        }
+      }
+    } catch {}
+  tableNIGS.title = formatLayerTitle(layerKey, type, tokenType, tgt.tokenType, 'srcToTgts');
+  tableNIGS.$options.next({ hasNigData: true, layer: layerKey, type, tokenType, values, attnActivations, pruningCutoffs, globalNigExtent, globalAttnActivationExtent, globalFFNActivationExtent, orientation: 'srcToTgts', sortTokenType: tgt.tokenType, summary: formatLayerTitle(layerKey, type, tokenType, tgt.tokenType, 'srcToTgts') });
+    // Histogram shows distribution of all NIG values in the selected layer
+    const sVals = (thresholdSlider && thresholdSlider.$values && typeof thresholdSlider.$values.getValue === 'function'
+      ? thresholdSlider.$values.getValue()
+      : [0.5]);
+    const threshold = Math.pow(10, -4 + 4 * sVals[0]); // Logarithmic mapping
+    const useAbsoluteValues = absoluteValuesToggle.$checked.getValue ? absoluteValuesToggle.$checked.getValue() : true;
+    lastHistogramState = { values: nig[layerKey], type: null };
+  nigHistogram.$options.next({ ...lastHistogramState, threshold, scale: 'symlog', extent: globalNigExtent, absMax: globalNigAbsMax, useAbsoluteValues });
+    if (type === 'ATTN') violinPlotComponent.$options.next({ layer: layerKey, type, tokenType, values: nig[layerKey] });
+    return;
   } else if (src.type === 'FFN' && tgt.type === 'ATTN' && tgt.layer === src.layer + 1 && src.tokenType === tgt.tokenType) {
     layerKey = ffnLayerKey(src.layer);
     type = 'FFN';
@@ -485,17 +943,60 @@ architectureComponent.$selection.subscribe(sel => {
     const layerData = nig[layerKey]; // shape (5, neurons)
     const tokenIndex = tokenTypes.indexOf(tokenType);
     if (layerData && tokenIndex !== -1) values = layerData[tokenIndex];
+    // Try to fetch activations for FFN if backend provided them (optional)
+  try {
+      const result = nigModelInstance.$data.getValue()?.result;
+      const candidates = [result?.ffn_activations, result?.activations_ffn, result?.activations];
+      const srcMap = candidates.find(x => x && x[layerKey]);
+      if (srcMap) {
+        const row = srcMap[layerKey][tokenIndex];
+        if (Array.isArray(row)) activations = row;
+      }
+    } catch {}
+  tableNIGS.title = formatLayerTitle(layerKey, type, tokenType);
+  const sVals = (thresholdSlider && thresholdSlider.$values && typeof thresholdSlider.$values.getValue === 'function'
+    ? thresholdSlider.$values.getValue()
+    : [0.5]);
+  const threshold = Math.pow(10, -4 + 4 * sVals[0]); // Logarithmic mapping
+  const useAbsoluteValues = absoluteValuesToggle.$checked.getValue ? absoluteValuesToggle.$checked.getValue() : true;
+  lastHistogramState = { values, type: 'FFN_SUBSET' };
+  nigHistogram.$options.next({ ...lastHistogramState, threshold, scale: 'symlog', extent: globalNigExtent, absMax: globalNigAbsMax, useAbsoluteValues });
+  tableNIGS.$options.next({ hasNigData: true, layer: layerKey, type, tokenType, values, activations, pruningCutoffs, globalNigExtent, globalAttnActivationExtent, globalFFNActivationExtent, summary: formatLayerTitle(layerKey, type, tokenType) });
   } else if (src.type === 'FFN' && tgt.type === 'ATTN' && tgt.layer === src.layer) {
-    // Same-layer reverse attention view (tgt token attends to all src tokens)
+    // Same-layer: Square → Circle - show all sources to the square's target
     layerKey = attnLayerKey(src.layer);
     type = 'ATTN';
-    tokenType = tgt.tokenType; // we take target token as focus for reverse orientation
+    tokenType = src.tokenType; // The square's token (this will be the target in the attention)
     const layerData = nig[layerKey];
     const tokenIndex = tokenTypes.indexOf(tokenType);
     if (layerData && tokenIndex !== -1) {
-      // For each head take the row corresponding to target token (tgtToken -> all src tokens)
-      values = layerData.map(head => head[tokenIndex]); // shape (12,5)
+      // tgtsToSrcs: show all sources → fixed target (square's token)
+      // layerData[head][tgt][src] => pick row where tgt=square's token
+      values = layerData.map(head => head[tokenIndex]); // (12,5) - row for target=square
     }
+    // Optional ATTN activations for reverse orientation
+    try {
+      const result = nigModelInstance.$data.getValue()?.result;
+      const candidates = [result?.attn_activations, result?.activations_attn, result?.attention, result?.activations];
+      const srcMap = candidates.find(x => x && x[layerKey]);
+      if (srcMap) {
+        const raw = srcMap[layerKey]; // (12,5,5)
+        if (Array.isArray(raw)) {
+          var attnActivations = raw.map(head => head[tokenIndex]); // (12,5) - row for target=square
+        }
+      }
+    } catch {}
+  tableNIGS.title = formatLayerTitle(layerKey, type, tokenType, tgt.tokenType, 'tgtsToSrcs');
+  tableNIGS.$options.next({ hasNigData: true, layer: layerKey, type, tokenType, values, attnActivations, pruningCutoffs, globalNigExtent, globalAttnActivationExtent, globalFFNActivationExtent, orientation: 'tgtsToSrcs', sortTokenType: tgt.tokenType, summary: formatLayerTitle(layerKey, type, tokenType, tgt.tokenType, 'tgtsToSrcs') });
+    const sVals = (thresholdSlider && thresholdSlider.$values && typeof thresholdSlider.$values.getValue === 'function'
+      ? thresholdSlider.$values.getValue()
+      : [0.5]);
+    const threshold = Math.pow(10, -4 + 4 * sVals[0]); // Logarithmic mapping
+    const useAbsoluteValues = absoluteValuesToggle.$checked.getValue ? absoluteValuesToggle.$checked.getValue() : true;
+    lastHistogramState = { values: nig[layerKey], type: null };
+    nigHistogram.$options.next({ ...lastHistogramState, threshold, scale: 'symlog', extent: globalNigExtent, absMax: globalNigAbsMax, useAbsoluteValues });
+    if (type === 'ATTN') violinPlotComponent.$options.next({ layer: layerKey, type, tokenType, values: nig[layerKey] });
+    return;
   } else if (src.type === 'FFN' && tgt.type === 'TOP' && src.layer === 11) {
     layerKey = ffnLayerKey(src.layer);
     type = 'FFN';
@@ -503,23 +1004,84 @@ architectureComponent.$selection.subscribe(sel => {
     const layerData = nig[layerKey];
     const tokenIndex = tokenTypes.indexOf(tokenType);
     if (layerData && tokenIndex !== -1) values = layerData[tokenIndex];
+    // Optional activations for FFN
+    try {
+      const result = nigModelInstance.$data.getValue()?.result;
+      const candidates = [result?.ffn_activations, result?.activations_ffn, result?.activations];
+      const srcMap = candidates.find(x => x && x[layerKey]);
+      if (srcMap) {
+        const row = srcMap[layerKey][tokenIndex];
+        if (Array.isArray(row)) activations = row;
+      }
+    } catch {}
+  tableNIGS.title = formatLayerTitle(layerKey, type, tokenType);
+  const sVals = (thresholdSlider && thresholdSlider.$values && typeof thresholdSlider.$values.getValue === 'function'
+    ? thresholdSlider.$values.getValue()
+    : [0.5]);
+  const threshold = Math.pow(10, -4 + 4 * sVals[0]); // Logarithmic mapping
+  const useAbsoluteValues = absoluteValuesToggle.$checked.getValue ? absoluteValuesToggle.$checked.getValue() : true;
+  lastHistogramState = { values, type: 'FFN_SUBSET' };
+  nigHistogram.$options.next({ ...lastHistogramState, threshold, scale: 'symlog', extent: globalNigExtent, absMax: globalNigAbsMax, useAbsoluteValues });
+  tableNIGS.$options.next({ hasNigData: true, layer: layerKey, type, tokenType, values, activations, pruningCutoffs, globalNigExtent, globalAttnActivationExtent, globalFFNActivationExtent, summary: formatLayerTitle(layerKey, type, tokenType) });
   } else {
     // Unsupported pair -> clear
-    tableNIGS.$options.next({ hasNigData: true, layer: null, type: null, tokenType: null, values: null });
+    tableNIGS.title = 'NIG values';
+    tableNIGS.$options.next({ hasNigData: true, layer: null, type: null, tokenType: null, values: null, summary: undefined, globalNigExtent });
     return;
   }
 
   if (values === undefined || values === null) {
-    tableNIGS.$options.next({ hasNigData: true, layer: layerKey, type, tokenType, values: null, pruningCutoffs });
+  tableNIGS.title = 'NIG values';
+  tableNIGS.$options.next({ hasNigData: true, layer: layerKey, type, tokenType, values: null, pruningCutoffs, globalNigExtent, summary: formatLayerTitle(layerKey, type, tokenType) });
     return;
   }
 
-  tableNIGS.$options.next({ hasNigData: true, layer: layerKey, type, tokenType, values, pruningCutoffs });
+  tableNIGS.$options.next({ hasNigData: true, layer: layerKey, type, tokenType, values, activations, attnActivations, pruningCutoffs, globalNigExtent, globalAttnActivationExtent, globalFFNActivationExtent, summary: formatLayerTitle(layerKey, type, tokenType) });
   // Violin plot gets the full underlying tensor for its layer (for ATTN give raw head tensor; for FFN give all token rows)
+  if (type === 'FFN') {
+    violinPlotComponent.$options.next({ layer: layerKey, type, tokenType, values: nig[layerKey] });
+  }
+});
+
+// New: handle clicks on ATTN layer labels to show token-type by token-type heatmap in the NIG table
+architectureComponent.labelClick$.subscribe((evt) => {
+  if (!evt) return;
+  const { layer, type } = evt;
+  const doc = nigModelInstance.$data.getValue();
+  const nig = doc && doc.result && doc.result.subset_b;
+  if (!nig) return;
   if (type === 'ATTN') {
-    violinPlotComponent.$options.next({ layer: layerKey, type, tokenType, values: nig[layerKey] });
+    const layerKey = `bert.encoder.layer.${layer}.attention.self.attention_probs`;
+    const attn = nig[layerKey]; // expect [12,5,5]
+    if (Array.isArray(attn)) {
+      // DEBUG: Examine directional mapping for a few pairs (cls->qry vs qry->cls)
+      try {
+        const TOKENS = ['cls','qry','sep1','doc','sep2'];
+        const tokenIndex = t => TOKENS.indexOf(t);
+        const agg = Array.from({length:5}, () => Array(5).fill(0)); // [src][tgt]
+        for (let h=0; h<attn.length; h++) {
+          for (let tgt=0; tgt<5; tgt++) {
+            for (let src=0; src<5; src++) {
+              const v = attn[h]?.[tgt]?.[src];
+              if (typeof v === 'number') agg[src][tgt] += v;
+            }
+          }
+        }
+        const cls_qry = agg[tokenIndex('cls')][tokenIndex('qry')];
+        const qry_cls = agg[tokenIndex('qry')][tokenIndex('cls')];
+        console.log('[DEBUG ATTN_LAYER_HEATMAP] Aggregated matrix [src][tgt] sample:', {
+          'cls->qry': cls_qry,
+          'qry->cls': qry_cls,
+          row_cls: agg[tokenIndex('cls')],
+          row_qry: agg[tokenIndex('qry')]
+        });
+      } catch (e) { console.warn('Debug aggregation failed', e); }
+  tableNIGS.title = `L${layer} ATTN token↔token heatmap (tgt→src view)`;
+  tableNIGS.$options.next({ hasNigData: true, layer: layerKey, type: 'ATTN_LAYER_HEATMAP', values: attn, globalNigExtent, globalAttnActivationExtent, globalFFNActivationExtent, orientation: 'tgtsToSrcs', summary: `Layer L${layer} ATTN token-by-token (tgt→src)` });
+    }
   } else if (type === 'FFN') {
-    violinPlotComponent.$options.next({ layer: layerKey, type, tokenType, values: nig[layerKey] });
+    // Optional: could show per-token aggregation overview; for now keep existing selection-driven behavior
+    // No action on FFN label click
   }
 });
 
@@ -536,11 +1098,13 @@ layerDropdown.$value.subscribe(layer => {
 			type: null, // No layer type for dropdown
 			tokenType: null, // No token type for dropdown
 			values: nig[layer],
+			globalNigExtent
 		});
 	} else if (nig) {
 		tableNIGS.$options.next({ 
 			hasNigData: true,
-			error: 'Invalid layer or no data' 
+			error: 'Invalid layer or no data',
+			globalNigExtent
 		});
 	}
 });
@@ -613,7 +1177,7 @@ submitPrunedForwardPass.$click.subscribe(() => {
     passage: passageInput.$value.getValue(),
     pruning_percentage_attention: attentionThreshold,
     pruning_percentage_ffn: ffnThreshold,
-    // NEW: Include pruning rules and targets from the pruner component
+    // Include pruning rules and targets from the pruner component
     pruning_enabled: prunerOptions ? prunerOptions.enabled : false,
     pruning_rules: prunerOptions ? (prunerOptions.pruningRules || []) : [],
     pruning_targets: prunerOptions ? (prunerOptions.pruningTargets || []) : [],
@@ -735,7 +1299,8 @@ prunerComponent.$options.subscribe((options) => {
       // Update the nigtable with the same data but new pruning cutoffs
       tableNIGS.$options.next({
         ...currentNigtableOptions,
-        pruningCutoffs: pruningCutoffs
+        pruningCutoffs: pruningCutoffs,
+        globalNigExtent
       });
       
       console.log('Refreshed nigtable with updated pruning cutoffs:', pruningCutoffs);
@@ -750,11 +1315,24 @@ const dash = dashboard({
 });
 
 dash.page('Query Review')
-  .use([queryInput, passageInput],[numRepsInput, baselineDropdown, submitQuery], progIG, [outputText]);
+  .use([
+    queryInput,
+    passageInput,
+    passageInput2
+  ],
+  subsetButtons,
+  [numRepsInput, baselineDropdown, submitQuery], progIG, [outputText]);
 
 //layerDropdown
 dash.page('NIG values')
-  .use([queryInput, passageInput],[numRepsInput, baselineDropdown], progNIG, [nigSnapshotSelect, clearNigSnapshotsBtn],[loadNigSnapshotBtn, submitNIG] ,[thresholdSlider, thresholdInfo],[architectureComponent, tableNIGS], violinPlotComponent)
+  .use(
+  [queryInput, subsetButtons],
+  [passageInput,passageInput2],
+  [numRepsInput, baselineDropdown, submitNIG], progNIG, [nigSnapshotSelect, clearNigSnapshotsBtn,loadNigSnapshotBtn] ,
+  thresholdSlider,
+  [absoluteValuesToggle, architectureColorsToggle, thresholdInfo],
+  nigHistogram,
+  [architectureComponent, tableNIGS], violinPlotComponent)
   .sidebar( submitForwardPass, forwardPassOutput, submitPrunedForwardPass, prunedForwardPassOutput, prunerComponent);
 
 dash.show();

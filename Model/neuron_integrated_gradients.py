@@ -109,6 +109,22 @@ def neuron_integrated_gradients(
             progress_callback(i + 1, num_reps)
 
         
+    # Capture final activations for the true input (last step equals input embeddings)
+    # outputs_store currently contains tensors for the last processed input
+    final_activations = {}
+    try:
+        for key, tensor in extractor.outputs_store.items():
+            if ("attention_probs" in key) or ("intermediate.dense" in key):
+                t = tensor.detach().cpu()
+                # Select the last item in the batch (true input at final step)
+                if t.dim() >= 1:
+                    t = t[-1]
+                final_activations[key] = t.numpy()
+        # Debug keys collected
+        print("[NIG] Captured activation keys:", list(final_activations.keys())[:4], '...')
+    except Exception:
+        final_activations = {}
+
     extractor.clear_items()
     extractor.remove_hooks()
 
@@ -145,7 +161,7 @@ def neuron_integrated_gradients(
             
     gc.collect()
     torch.cuda.empty_cache() 
-    return path_gradients, aggregated_error           
+    return path_gradients, aggregated_error, final_activations           
 
 def nig_predict(query, passage, num_reps, batch_size, baseline_function, progress_callback=None):
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -183,7 +199,7 @@ def nig_predict(query, passage, num_reps, batch_size, baseline_function, progres
         device
     )
 
-    nig, error = neuron_integrated_gradients(
+    nig, error, activations = neuron_integrated_gradients(
         model=model,
         input_embeddings=input_embeds,
         token_type_ids=inputs["token_type_ids"],
@@ -200,4 +216,4 @@ def nig_predict(query, passage, num_reps, batch_size, baseline_function, progres
     print(nig["bert.encoder.layer.0.attention.self.attention_probs"].shape)
     print(nig["bert.encoder.layer.0.intermediate.dense"].shape)
 
-    return nig, error, sep_position
+    return nig, error, sep_position, activations

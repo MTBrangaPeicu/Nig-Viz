@@ -5,3 +5,6 @@ export * from './better-number';
 export * from './better-text';
 export * from './pruner';
 export * from './violinplot';
+export * from './subset-buttons';
+export * from './nig-histogram';
+export * from './log-threshold-slider';

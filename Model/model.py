@@ -18,8 +18,8 @@ from transformers import AutoModelForSequenceClassification, AutoTokenizer
 import torch
 
 # Setup DataStore and Services
-# store = DataStore("http://localhost:3030")
-store = DataStore("https://marcelle.lisn.upsaclay.fr/nig-viz/api")
+store = DataStore("http://localhost:3030")
+#store = DataStore("https://marcelle.lisn.upsaclay.fr/nig-viz/api")
 
 ig_service = store.service("predictions")
 nig_service = store.service("nig-values")
@@ -34,19 +34,37 @@ ir_ds = ir_datasets.load("msmarco-passage/trec-dl-2019/judged")
 # Cache queries (small set for TREC DL 2019 judged)
 queries_list = list(ir_ds.queries_iter())
 print(f"Loaded {len(queries_list)} queries")
+# Build lookup map query_id -> query text
+queries_by_id = {}
+try:
+    for q in queries_list:
+        queries_by_id[q.query_id] = q.text
+except Exception:
+    pass
 
-# Build qrels map: query_id -> list of relevant doc_ids (relevance > 0)
+# Build qrels maps:
+#  - qrels_by_q: query_id -> list of judged doc_ids (any level)
+#  - qrels_by_q_level: query_id -> { level(int) -> list of doc_ids }
 qrels_by_q = defaultdict(list)
+qrels_by_q_level = defaultdict(lambda: defaultdict(list))
 for qr in ir_ds.qrels_iter():
     try:
-        rel = qr.relevance
+        rel = int(getattr(qr, "relevance", 0))
     except Exception:
-        rel = getattr(qr, "relevance", 0)
-    if rel and rel > 0:
-        qrels_by_q[qr.query_id].append(qr.doc_id)
+        rel = 0
+    qid = qr.query_id
+    did = qr.doc_id
+    qrels_by_q[qid].append(did)
+    qrels_by_q_level[qid][rel].append(did)
 
-for qid in qrels_by_q:
-    random.shuffle(qrels_by_q[qid])
+for qid, lst in qrels_by_q.items():
+    random.shuffle(lst)
+for qid, levels in qrels_by_q_level.items():
+    for rel, lst in levels.items():
+        random.shuffle(lst)
+
+# Compute available relevance levels across the dataset
+AVAILABLE_LEVELS = sorted({rel for _qid, lv in qrels_by_q_level.items() for rel in lv.keys()}, reverse=True)
 
 # Try to get a docs store for random access by doc_id (preferred)
 docs_store = None
@@ -76,76 +94,167 @@ model.eval()
 tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
 
 
-def get_random_samples(n=10, max_passages_per_query=10):
-    """Get n random samples from ir_datasets (TREC DL 2019 judged queries with judged passages).
-
-    Each sample has shape: { query: str, passages: [{text: str}, ...] }
-    Passages are drawn from judged relevant docs when available; queries with no judged docs are skipped.
+def get_random_samples(max_queries=10, subset="Random", max_passages_per_query=10):
     """
-    if not queries_list:
-        return []
+    Return a list of samples where each sample is { query_id, query, passages: [{text},...] }.
+    subset can be 'Random', 'Rel=0', 'Rel=1', etc.
+    """
+    samples = []
 
-    # Randomly permute query indices and collect samples with judged docs
-    indices = list(range(len(queries_list)))
-    random.shuffle(indices)
+    # filter by subset choice
+    chosen_queries = queries_list[:max_queries]
 
-    selected = []
-    needed_doc_ids = set()
-    for idx in indices:
-        if len(selected) >= n:
-            break
-        q = queries_list[idx]
-        doc_ids = qrels_by_q.get(q.query_id, [])
+    for q in chosen_queries:
+        query_id = q.query_id
+        query_text = q.text
+
+        # choose doc ids per subset
+        if subset == "Random":
+            # Get random documents from entire dataset, excluding judged docs for this query
+            judged_docs = set(qrels_by_q.get(query_id, []))
+            
+            # Collect random doc_ids from the entire dataset
+            all_docs_sample = []
+            for d in ir_ds.docs_iter():
+                if d.doc_id not in judged_docs:
+                    all_docs_sample.append(d.doc_id)
+                # Sample enough to get good randomness
+                if len(all_docs_sample) >= 1000:
+                    break
+            # Shuffle and take max_passages_per_query
+            random.shuffle(all_docs_sample)
+            doc_ids = all_docs_sample[:max_passages_per_query]
+        else:
+            # For relevance levels, use judged docs for this specific query
+            level = None
+            try:
+                if subset.startswith("Rel="):
+                    level = int(subset.split("=", 1)[1])
+            except Exception:
+                level = None
+            if level is None:
+                doc_ids = qrels_by_q.get(query_id, [])
+            else:
+                doc_ids = qrels_by_q_level.get(query_id, {}).get(level, [])
+
         if not doc_ids:
             continue
-        # select up to max_passages_per_query doc ids
+
         chosen = doc_ids[:max_passages_per_query]
-        needed_doc_ids.update(chosen)
-        selected.append((q, chosen))
 
-    if not selected:
-        return []
-
-    # Fetch doc texts
-    doc_texts = {}
-    if docs_store is not None:
-        for did in needed_doc_ids:
-            d = docs_store.get(did)
-            if d is not None:
-                doc_texts[did] = getattr(d, "text", "") or ""
-    else:
-        # Fallback: scan docs_iter until all needed doc_ids found
-        for d in ir_ds.docs_iter():
-            if d.doc_id in needed_doc_ids:
-                doc_texts[d.doc_id] = getattr(d, "text", "") or ""
-                if len(doc_texts) == len(needed_doc_ids):
+        # fetch texts for chosen doc_ids
+        passages = []
+        if docs_store is not None:
+            for did in chosen:
+                d = docs_store.get(did)
+                if d is not None:
+                    txt = getattr(d, "text", "") or ""
+                    if txt:
+                        passages.append({"text": txt})
+        else:
+            # docs_store unavailable, iterate all docs
+            needed = set(chosen)
+            for d in ir_ds.docs_iter():
+                if d.doc_id in needed:
+                    txt = getattr(d, "text", "") or ""
+                    if txt:
+                        passages.append({"text": txt})
+                if len(passages) == len(chosen):
                     break
 
-    # Build samples
-    samples = []
-    for q, doc_ids in selected:
-        passages = [
-            {"text": doc_texts.get(did, "")}
-            for did in doc_ids
-            if doc_texts.get(did, "")
-        ]
         if passages:
-            samples.append(
-                {
-                    "query": q.text,
-                    "passages": passages,
-                }
-            )
+            samples.append({
+                "query_id": query_id,
+                "query": query_text,
+                "passages": passages
+            })
 
     return samples
+
+
+def get_passages_for_query(query_id, subset="Random", max_passages_per_query=10):
+    """
+    Fetch passages for a single query.
+    subset: 'Random', 'Rel=0', 'Rel=1', ...
+    Returns { query_id, query, passages: [{text}, ...] }
+    """
+    if not query_id:
+        return {"query_id": query_id, "query": "", "passages": []}
+
+    # choose doc ids per subset
+    if subset == "Random":
+        # Get random documents from entire dataset, excluding judged docs for this query
+        judged_docs = set(qrels_by_q.get(query_id, []))
+        
+        # Collect random doc_ids from the entire dataset
+        all_docs_sample = []
+        for d in ir_ds.docs_iter():
+            if d.doc_id not in judged_docs:
+                all_docs_sample.append(d.doc_id)
+            # Sample enough to get good randomness
+            if len(all_docs_sample) >= 1000:
+                break
+        # Shuffle and take max_passages_per_query
+        random.shuffle(all_docs_sample)
+        doc_ids = all_docs_sample[:max_passages_per_query]
+    else:
+        # For relevance levels, use judged docs for this specific query
+        level = None
+        try:
+            if subset.startswith("Rel="):
+                level = int(subset.split("=", 1)[1])
+        except Exception:
+            level = None
+        if level is None:
+            doc_ids = qrels_by_q.get(query_id, [])
+        else:
+            doc_ids = qrels_by_q_level.get(query_id, {}).get(level, [])
+
+    if not doc_ids:
+        return {"query_id": query_id, "query": queries_by_id.get(query_id, ""), "passages": []}
+
+    chosen = doc_ids[:max_passages_per_query]
+
+    # fetch texts
+    passages = []
+    if docs_store is not None:
+        for did in chosen:
+            d = docs_store.get(did)
+            if d is not None:
+                txt = getattr(d, "text", "") or ""
+                if txt:
+                    passages.append({"text": txt})
+    else:
+        needed = set(chosen)
+        for d in ir_ds.docs_iter():
+            if d.doc_id in needed:
+                txt = getattr(d, "text", "") or ""
+                if txt:
+                    passages.append({"text": txt})
+                if len(passages) == len(chosen):
+                    break
+
+    return {"query_id": query_id, "query": queries_by_id.get(query_id, ""), "passages": passages}
 
 
 # --- Dataset sample handler ---
 def handle_sample_request(doc):
     try:
         print(f"Received sample request: {doc}")
+        subset = doc.get("subset", "Random")
+        # If a specific query is requested, only return its passages
+        query_id = doc.get("query_id") or doc.get("qid") or None
+        if query_id is not None:
+            result = get_passages_for_query(query_id, subset=subset)
+            dataset_service.patch(
+                doc["_id"],
+                {"status": "success", "subset": subset, "passages": result.get("passages", []), "query_id": query_id},
+            )
+            return
+
+        # Else return a random set of queries with passages
         n_samples = doc.get("n", 10)
-        samples = get_random_samples(n_samples)
+        samples = get_random_samples(n_samples, subset=subset)
         if not samples:
             print("No samples generated.")
             dataset_service.patch(
@@ -153,9 +262,12 @@ def handle_sample_request(doc):
                 {"status": "error", "error": "No samples could be generated."},
             )
             return
-        print(f"samples Generated")
+        print(f"samples Generated (subset={subset})")
         # Ensure the samples field is included in the response
-        dataset_service.patch(doc["_id"], {"status": "success", "samples": samples})
+        dataset_service.patch(
+            doc["_id"],
+            {"status": "success", "samples": samples, "subset": subset, "levels": AVAILABLE_LEVELS},
+        )
         # print(f"Response sent to frontend: {samples}")
     except Exception as e:
         print(f"Error handling sample request: {e}")
@@ -221,7 +333,7 @@ def handle_nig_prediction(doc):
             progress = current / total
             nig_service.patch(id, {"progress": progress})
 
-        nig, error, sep_position = nig_predict(
+        nig, error, sep_position, activations = nig_predict(
             query, passage, num_reps, BATCH_SIZE, baseline_func, progress_callback
         )
 
@@ -237,6 +349,49 @@ def handle_nig_prediction(doc):
         # Compute detailed aggregation (subset B only)
         subset_b = aggregate_nig(nig, sep_position)
 
+        # Also aggregate activations into subset_b-like structures for frontend
+        attn_activations = {}
+        ffn_activations = {}
+        try:
+            if activations and isinstance(activations, dict):
+                # Build subset-B manually for activations (avoid aggregate_nig masking mismatch)
+                for k, a in activations.items():
+                    t = torch.as_tensor(a)
+                    L = t.size(1) if t.dim() == 3 else t.size(0)
+                    cls = torch.zeros(L, dtype=torch.bool); cls[0] = True
+                    qry = torch.zeros(L, dtype=torch.bool); qry[1:sep_position] = True
+                    sep1 = torch.zeros(L, dtype=torch.bool); sep1[sep_position] = True
+                    doc = torch.zeros(L, dtype=torch.bool); doc[sep_position+1:-1] = True
+                    sep2 = torch.zeros(L, dtype=torch.bool); sep2[-1] = True
+                    if t.dim() == 3:  # ATTN: [H, T, T]
+                        rows = []
+                        for src_m in [cls, qry, sep1, doc, sep2]:
+                            cols = []
+                            for tgt_m in [cls, qry, sep1, doc, sep2]:
+                                sub = t[:, src_m, :][:, :, tgt_m]
+                                if sub.numel() == 0:
+                                    agg = torch.zeros(t.size(0))
+                                else:
+                                    agg = torch.sum(sub, dim=(1,2))
+                                cols.append(agg)
+                            rows.append(torch.stack(cols, dim=1))  # [H,5]
+                        out = torch.stack(rows, dim=1)  # [H,5,5]
+                        attn_activations[k] = out.numpy().tolist()
+                    elif t.dim() == 2:  # FFN: [T, N]
+                        rows = []
+                        for m in [cls, qry, sep1, doc, sep2]:
+                            sub = t[m, :]
+                            if sub.numel() == 0:
+                                agg = torch.zeros(t.size(1))
+                            else:
+                                agg = torch.sum(sub, dim=0)
+                            rows.append(agg)
+                        out = torch.stack(rows, dim=0)  # [5,N]
+                        ffn_activations[k] = out.numpy().tolist()
+                print("[ACT] attn layers:", len(attn_activations), "ffn layers:", len(ffn_activations))
+        except Exception as e:
+            print(f"Activation aggregation failed: {e}")
+
         # Debugging: Print the shape of subset_b
         print("Subset B Keys:", subset_b.keys())
         for key, value in subset_b.items():
@@ -248,6 +403,8 @@ def handle_nig_prediction(doc):
         # Ensure proper formatting for frontend
         formatted_result = {
             "subset_b": subset_b,  # for detailed data and frontend counting
+            "attn_activations": attn_activations,
+            "ffn_activations": ffn_activations,
             # "error": error,  # Commented out - error rates too high, keeping as NA
         }
 
