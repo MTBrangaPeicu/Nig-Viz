@@ -10,8 +10,11 @@ Open http://localhost:5173 to view it in the browser.
 
 The page will reload if you make edits.
 
-### npm run build
+### npm run backend
 
-Builds a static copy of your site to the `dist/` folder.
-Your app is ready to be deployed!
+This runs the backend of the site letting the app and python model code to connect to the Datastore
+
+### (From the Model folder) python model.py
+
+This runs the computation of NIG values as well as updates the Query Passage values
 
