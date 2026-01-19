@@ -1,0 +1,936 @@
+<script>
+	// @ts-nocheck
+	import { combineLatest } from 'rxjs';
+	import { onMount, onDestroy } from 'svelte';
+	import * as d3 from 'd3';
+
+
+	export const options = {};
+	export let selection$;
+	export let threshold$;
+	export let edges$;
+	export let pruningState$;
+	export let labelClick$;
+	export let colorNodesEnabled$;
+	export let nodeColorData$;
+	export let prunedEdges$;
+	export let prunedNodes$;
+	export let pruningCursorEnabled$;
+	//export let error$;
+
+
+	// Adjustable vertical shift for everything below the text+bar
+	const yShift = 48;
+	const barHeight = 16; // Define barHeight here for use in drawEdges
+	const topBarOffset = 12;
+
+	let svg;
+	let edgesGroup;
+	let topBarEl; // reference to the clickable top bar
+	let errorSub; // Declare errorSub variable
+	let nodePruningState = { enabled: false, rules: [], targets: [], thresholds: {} };
+	let architectureTooltipEl; // Custom tooltip element
+	let colorNodesEnabled = false;
+	let nodeColorData = null;
+	let prunedEdges = new Set();
+	let prunedNodes = new Set();
+	let pruningCursorEnabled = false;
+
+	// Two-step selection: source node then target node
+	let currentSelection = { source: null, target: null };
+
+	// Scroll the scrollable container to the bottom
+	function scrollToBottom() {
+		const container = document.getElementById('architecture-grid');
+		if (!container) return;
+		requestAnimationFrame(() => {
+			container.scrollTop = container.scrollHeight;
+		});
+	}
+
+	// Subscribe to selection changes
+	selection$.subscribe(sel => {
+		currentSelection = sel || { source: null, target: null };
+		if (svg) updateSelectionHighlight();
+	});
+
+	// Subscribe to pruning state changes for node coloring
+	pruningState$.subscribe(state => {
+		nodePruningState = state;
+		// Redraw the grid when pruning state changes
+		if (svg) {
+			updateNodeColors();
+		}
+	});
+
+	// Subscribe to color nodes toggle
+	colorNodesEnabled$.subscribe(enabled => {
+		colorNodesEnabled = enabled;
+		console.log('[Architecture View] Color nodes enabled:', enabled);
+		if (svg) {
+			updateNodeColors();
+		}
+	});
+
+	// Subscribe to node color data
+	nodeColorData$.subscribe(data => {
+		nodeColorData = data;
+		console.log('[Architecture View] Node color data updated:', data ? 'available' : 'null');
+		if (svg) {
+			updateNodeColors();
+		}
+	});
+
+	// Subscribe to pruned edges set
+	prunedEdges$.subscribe(edges => {
+		prunedEdges = edges;
+		if (svg) redrawEdges();
+	});
+
+	// Subscribe to pruned nodes set
+	prunedNodes$.subscribe(nodes => {
+		prunedNodes = nodes;
+		if (svg) updateNodeColors();
+	});
+
+	// Subscribe to pruning cursor state and set global cursor
+	pruningCursorEnabled$.subscribe(enabled => {
+		pruningCursorEnabled = enabled;
+		// Set cursor globally on body when pruning mode is active
+		if (enabled) {
+			document.body.style.cursor = "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='6' cy='6' r='3'/%3E%3Cpath d='M8.12 8.12 12 12' /%3E%3Cpath d='M20 4 8.12 15.88' /%3E%3Cpath d='M14.47 14.48 20 20' /%3E%3Cpath d='M20 20 4 4' /%3E%3C/svg%3E\") 12 12, crosshair";
+		} else {
+			document.body.style.cursor = '';
+		}
+	});
+
+	// Handle pruning rule toggle when clicking nodes in pruning mode
+	function togglePruningRule(layer, type, tokenType) {
+		const currentState = nodePruningState;
+		const layerKey = `L${layer}_${type}`;
+		const ruleIndex = currentState.rules.findIndex(
+			r => r.layer === layerKey && r.tokenType === tokenType
+		);
+		
+		let newRules;
+		if (ruleIndex >= 0) {
+			// Remove existing rule
+			newRules = currentState.rules.filter((_, i) => i !== ruleIndex);
+		} else {
+			// Add new rule
+			newRules = [...currentState.rules, { layer: layerKey, tokenType }];
+		}
+		
+		// Update pruning state
+		pruningState$.next({
+			...currentState,
+			rules: newRules
+		});
+	}
+
+	// Function to check if a node should be red based on pruning rules
+	function shouldNodeBeRed(layer, type, tokenType) {
+		if (!nodePruningState.enabled) return false;
+
+		const layerKey = `L${layer}_${type}`;
+		
+		// Check if "all" is selected for this specific layer
+		if (nodePruningState.rules.some(rule => rule.layer === layerKey && rule.tokenType === 'all')) {
+			return true; // Highlight all token types in this specific layer
+		}
+
+		// Check pruning rules for specific layer/token matches
+		return nodePruningState.rules.some(rule => 
+			rule.layer === layerKey && rule.tokenType === tokenType
+		);
+	}
+
+	// Function to get color for a node based on its max value
+	// Uses EXACT same color scale as heatmaps and color scale legend
+	function getNodeColor(layerIndex, nodeType, tokenType) {
+		const tokenTypes = ['cls', 'qry', 'sep1', 'doc', 'sep2'];
+		const nodeId = `L${layerIndex}_${nodeType}_${tokenType}`;
+		
+		// Priority 1: Manually pruned nodes (red with reduced opacity)
+		if (prunedNodes.has(nodeId)) {
+			return 'red';
+		}
+		
+		// Priority 2: Threshold-based pruning (darkred)
+		if (shouldNodeBeRed(layerIndex, nodeType, tokenType)) {
+			return 'darkred';
+		}
+		
+		// Priority 3: Color by value if enabled and data available
+		if (colorNodesEnabled && nodeColorData && nodeColorData.nodeMaxValues) {
+			const nodeKey = `L${layerIndex}_${nodeType}_${tokenType}`;
+			const value = nodeColorData.nodeMaxValues[nodeKey];
+			
+			if (value !== undefined && nodeColorData.extent) {
+				const [minV, maxV] = nodeColorData.extent;
+				const maxAbs = Math.max(Math.abs(minV), Math.abs(maxV));
+				
+				// EXACT same symlog transformation as heatmaps
+				const symlog = (x) => {
+					if (x === 0) return 0;
+					const absX = Math.abs(x);
+					const logVal = Math.log10(absX + 1);
+					return Math.sign(x) * Math.pow(logVal, 0.7);
+				};
+				
+				// EXACT same color logic as heatmaps (LOGARITHMIC scale for NIG)
+				if (minV < 0 && maxV > 0) {
+					// Diverging with symlog - SAME as heatmap
+					const logMaxAbs = symlog(maxAbs);
+					const logVal = symlog(value);
+					const baseColor = d3.scaleDiverging(d3.interpolateRdBu)
+						.domain([logMaxAbs, 0, -logMaxAbs])
+						.clamp(true)(logVal);
+					const rgb = d3.color(baseColor).rgb();
+					rgb.r = Math.pow(rgb.r / 255, 0.8) * 255;
+					rgb.g = Math.pow(rgb.g / 255, 0.8) * 255;
+					rgb.b = Math.pow(rgb.b / 255, 0.8) * 255;
+					return rgb.toString();
+				} else {
+					// Sequential with log - SAME as heatmap
+					const logMin = symlog(minV);
+					const logMax = symlog(maxV);
+					const logVal = symlog(value);
+					const baseColor = d3.scaleSequential(d3.interpolateInferno)
+						.domain([logMin, logMax])
+						.clamp(true)(logVal);
+					const rgb = d3.color(baseColor).rgb();
+					rgb.r = Math.pow(rgb.r / 255, 0.8) * 255;
+					rgb.g = Math.pow(rgb.g / 255, 0.8) * 255;
+					rgb.b = Math.pow(rgb.b / 255, 0.8) * 255;
+					return rgb.toString();
+				}
+			}
+		}
+		
+		// Default colors
+		return nodeType === 'ATTN' ? 'gray' : 'darkgray';
+	}
+
+	// Function to update node colors based on pruning state and color mode
+	function updateNodeColors() {
+		const tokenTypes = ['cls', 'qry', 'sep1', 'doc', 'sep2'];
+		
+		// Update circles (ATTN nodes)
+		svg.selectAll(".attn-circle")
+			.attr("fill", function(d, i) {
+				const layerIndex = parseInt(this.getAttribute('data-layer'));
+				const tokenIndex = parseInt(this.getAttribute('data-token'));
+				const tokenType = tokenTypes[tokenIndex];
+				return getNodeColor(layerIndex, 'ATTN', tokenType);
+			})
+			.attr("fill-opacity", function() {
+				const nodeId = this.getAttribute('data-node-id');
+				return prunedNodes.has(nodeId) ? 0.3 : 1.0;
+			});
+
+		// Update squares (FFN nodes)
+		svg.selectAll(".ffn-square")
+			.attr("fill", function(d, i) {
+				const layerIndex = parseInt(this.getAttribute('data-layer'));
+				const tokenIndex = parseInt(this.getAttribute('data-token'));
+				const tokenType = tokenTypes[tokenIndex];
+				return getNodeColor(layerIndex, 'FFN', tokenType);
+			})
+			.attr("fill-opacity", function() {
+				const nodeId = this.getAttribute('data-node-id');
+				return prunedNodes.has(nodeId) ? 0.3 : 1.0;
+			});
+	}
+
+	// Utility to map tokenType label to index
+	function tokenTypeToIndex(tt) {
+		const tokenTypes = ['cls', 'qry', 'sep1', 'doc', 'sep2'];
+		return tokenTypes.indexOf(tt);
+	}
+
+	// Highlight the currently selected node (circle for ATTN, square for FFN)
+	function updateSelectionHighlight() {
+		// Reset styles
+		svg.selectAll('.attn-circle')
+			.attr('stroke', 'white')
+			.attr('stroke-width', 3)
+			.style('filter', null);
+		svg.selectAll('.ffn-square')
+			.attr('stroke', 'white')
+			.attr('stroke-width', 3)
+			.style('filter', null);
+		// Remove previous top-bar markers
+		svg.selectAll('.top-bar-marker').remove();
+		// Reset top bar default appearance
+		if (topBarEl) {
+			topBarEl.attr('stroke', '#888').classed('pulse', false).style('filter', null);
+		}
+		// Reset any previously highlighted edges
+		svg.selectAll('.edge-line')
+			.attr('stroke', function() { return d3.select(this).attr('data-stroke') || '#000'; })
+			.attr('stroke-dasharray', null)
+			.attr('stroke-dashoffset', null)
+			.attr('marker-end', null)
+			.attr('stroke-opacity', 0.8)
+			.style('filter', null);
+
+		const { source, target } = currentSelection || {};
+		const highlight = (nodeType, layer, tokenType) => {
+			const tokenIdx = tokenTypeToIndex(tokenType);
+			if (tokenIdx === -1) return;
+			const sel = svg.selectAll(nodeType === 'ATTN' ? '.attn-circle' : '.ffn-square')
+				.filter(function() {
+					return parseInt(this.getAttribute('data-layer')) === layer &&
+						parseInt(this.getAttribute('data-token')) === tokenIdx;
+				});
+			sel
+				.attr('stroke', '#22C55E')
+				.attr('stroke-width', 5)
+				.style('filter', 'drop-shadow(0 0 6px #22C55E)')
+				.raise();
+		};
+
+		if (source) highlight(source.type, source.layer, source.tokenType);
+		if (target) {
+			if (target.type === 'TOP') {
+				// Highlight whole bar in green and pulse
+				if (topBarEl) {
+					topBarEl
+						.attr('stroke', '#22C55E')
+						.style('filter', 'drop-shadow(0 0 6px #22C55E)');
+				}
+			} else {
+				highlight(target.type, target.layer, target.tokenType);
+			}
+		}
+
+		// Highlight connecting edges if both ends exist (only for the relevant layer)
+		if (source && target) {
+			const TOKENS = ['cls', 'qry', 'sep1', 'doc', 'sep2'];
+			const srcToken = source.tokenType;
+			const tgtToken = target.type === 'TOP' ? source.tokenType : target.tokenType; // TOP bar acts like same token channel
+			const expectedLayerKey = (() => {
+				if (source.type === 'ATTN' && target.type === 'FFN' && source.layer === target.layer) {
+					return `bert.encoder.layer.${source.layer}.attention.self.attention_probs`;
+				}
+				if (source.type === 'FFN' && target.type === 'ATTN' && target.layer === source.layer + 1) {
+					return `bert.encoder.layer.${source.layer}.intermediate.dense`;
+				}
+				if (source.type === 'FFN' && target.type === 'TOP' && source.layer === 11) {
+					return `bert.encoder.layer.${source.layer}.intermediate.dense`;
+				}
+				if (source.type === 'FFN' && target.type === 'ATTN' && target.layer === source.layer) {
+					// Same-layer FFN→ATTN highlights the attention layer
+					return `bert.encoder.layer.${source.layer}.attention.self.attention_probs`;
+				}
+				return null;
+			})();
+			// Match edges that connect source row to target row (including to-bar)
+			edgesGroup.selectAll('.edge-line')
+				.filter(function() {
+					const e = d3.select(this);
+					const eSrc = e.attr('data-srcToken');
+					const eTgt = e.attr('data-tgtToken');
+					const toBar = e.attr('data-to-bar') === '1';
+					const layerOk = expectedLayerKey ? e.attr('data-layer') === expectedLayerKey : true;
+					if (!layerOk) return false;
+					if (target.type === 'TOP') return toBar && eSrc === srcToken && eTgt === srcToken;
+					// Same-layer FFN→ATTN uses reversed token mapping (edge stores ATTN src = target.token, FFN tgt = source.token)
+					if (source.type === 'FFN' && target.type === 'ATTN' && target.layer === source.layer) {
+						return eSrc === tgtToken && eTgt === srcToken;
+					}
+					return eSrc === srcToken && eTgt === tgtToken;
+				})
+				.each(function() {
+					const sel = d3.select(this);
+					const x1 = parseFloat(sel.attr('x1')) || 0;
+					const y1 = parseFloat(sel.attr('y1')) || 0;
+					const x2 = parseFloat(sel.attr('x2')) || 0;
+					const y2 = parseFloat(sel.attr('y2')) || 0;
+					const len = Math.hypot(x2 - x1, y2 - y1) || 200;
+					const flowDown = (source.type === 'FFN' && target.type === 'ATTN' && target.layer === source.layer);
+					sel
+						.attr('stroke', '#22C55E')
+						.attr('stroke-opacity', 1)
+						.attr('stroke-dasharray', '6,4')
+						.attr('marker-start', null)
+						.attr('marker-end', null)
+						.attr('stroke-dashoffset', flowDown ? 0 : len)
+						.transition()
+						.duration(1200)
+						.ease(d3.easeLinear)
+						.attr('stroke-dashoffset', flowDown ? len : 0);
+				})
+				.raise();
+		}
+
+		// Preselection: when only source is selected, show valid targets and edges in yellow
+		if (source && !target) {
+			const TOKENS = ['cls', 'qry', 'sep1', 'doc', 'sep2'];
+			const srcToken = source.tokenType;
+			const srcTokenIdx = tokenTypeToIndex(srcToken);
+			const amber = '#F59E0B';
+
+			// Helper to highlight a node in yellow
+            const preNode = (nodeType, layer, tokenType) => {
+                const tokenIdx = tokenTypeToIndex(tokenType);
+                if (tokenIdx === -1) return;
+                const sel = svg.selectAll(nodeType === 'ATTN' ? '.attn-circle' : '.ffn-square')
+                    .filter(function() {
+                        return parseInt(this.getAttribute('data-layer')) === layer &&
+                            parseInt(this.getAttribute('data-token')) === tokenIdx;
+                    });
+                sel
+                    .attr('stroke', amber)
+                    .attr('stroke-width', 5)
+                    .style('filter', `drop-shadow(0 0 6px ${amber})`)
+                    .raise();
+            };
+
+			// Helper to highlight matching edges in yellow
+			const preEdges = (predicate) => {
+				edgesGroup.selectAll('.edge-line')
+					.filter(function() { return predicate(d3.select(this)); })
+					.attr('stroke', amber)
+					.attr('stroke-opacity', 1)
+					.attr('stroke-dasharray', null)
+					.attr('marker-start', null)
+					.attr('marker-end', null)
+					.style('filter', `drop-shadow(0 0 6px ${amber})`)
+					.raise();
+			};
+
+			if (source.type === 'ATTN') {
+				// Valid targets: all FFN squares in same layer; edges from srcToken to all tgt tokens on attn layer
+				TOKENS.forEach(tgt => preNode('FFN', source.layer, tgt));
+				const expectedLayerKey = `bert.encoder.layer.${source.layer}.attention.self.attention_probs`;
+				preEdges(e => e.attr('data-layer') === expectedLayerKey && e.attr('data-srcToken') === srcToken);
+			}
+
+			if (source.type === 'FFN') {
+				// Case: FFN -> next ATTN (same token type only - FFN has no attention, just passes through)
+				if (source.layer < 11) {
+					preNode('ATTN', source.layer + 1, srcToken);
+					const expectedLayerKey = `bert.encoder.layer.${source.layer}.intermediate.dense`;
+					preEdges(e => e.attr('data-layer') === expectedLayerKey && e.attr('data-srcToken') === srcToken && e.attr('data-tgtToken') === srcToken);
+				}
+				// Case: FFN -> same-layer ATTN (reverse - any target token for attention view)
+				TOKENS.forEach(tgt => preNode('ATTN', source.layer, tgt));
+				const attnLayerKey = `bert.encoder.layer.${source.layer}.attention.self.attention_probs`;
+				preEdges(e => e.attr('data-layer') === attnLayerKey && e.attr('data-tgtToken') === srcToken);
+				// Case: FFN L11 -> TOP
+				if (source.layer === 11 && topBarEl) {
+					// Highlight bar
+					topBarEl.attr('stroke', amber).style('filter', `drop-shadow(0 0 6px ${amber})`);
+					const ffnKey = `bert.encoder.layer.${source.layer}.intermediate.dense`;
+					preEdges(e => e.attr('data-layer') === ffnKey && e.attr('data-to-bar') === '1' && e.attr('data-srcToken') === srcToken && e.attr('data-tgtToken') === srcToken);
+				}
+			}
+		}
+	}
+
+	// Removed scroll adjustments: no auto-scrolling or position preservation
+
+	// Handle click events for FFN and ATTN layers
+	function handleClick(layer, type, tokenType) {
+		console.log(`Clicked - Layer: ${layer}, Type: ${type}, Token Type: ${tokenType}`);
+		const cur = currentSelection || { source: null, target: null };
+		// Normalize click into a node object
+		const node = { layer, type, tokenType };
+
+		function isValidSecondClick(src, tgt) {
+			if (!src || !tgt) return false;
+			if (src.type === 'ATTN') {
+				// Only FFN of the same layer (above)
+				return tgt.type === 'FFN' && tgt.layer === src.layer;
+			}
+			if (src.type === 'FFN') {
+				// Either ATTN of next layer (must be same token type), TOP (if L11), or ATTN of same layer (any token - for reverse attention view)
+				if (tgt.type === 'ATTN' && tgt.layer === src.layer + 1 && tgt.tokenType === src.tokenType) return true;
+				if (tgt.type === 'ATTN' && tgt.layer === src.layer) return true;
+				if (tgt.type === 'TOP' && src.layer === 11) return true;
+				return false;
+			}
+			return false;
+		}
+
+		function flashInvalid(t) {
+			const tokenIdx = tokenTypeToIndex(t.tokenType);
+			if (tokenIdx === -1) return;
+			const sel = svg.selectAll(t.type === 'ATTN' ? '.attn-circle' : '.ffn-square')
+				.filter(function() {
+					return parseInt(this.getAttribute('data-layer')) === t.layer &&
+						parseInt(this.getAttribute('data-token')) === tokenIdx;
+				});
+			sel.classed('invalid-pulse', true);
+			setTimeout(() => sel.classed('invalid-pulse', false), 1000);
+		}
+
+		if (!cur.source) {
+			// First click cannot be TOP bar; show invalid on bar instead
+			if (type === 'TOP') {
+				if (topBarEl) {
+					topBarEl.classed('invalid-pulse', true);
+					setTimeout(() => topBarEl.classed('invalid-pulse', false), 1000);
+				}
+				return;
+			}
+			selection$.next({ source: node, target: null });
+			return;
+		}
+		if (!cur.target) {
+			// If clicking the same node, clear
+			if (cur.source.layer === node.layer && cur.source.type === node.type && cur.source.tokenType === node.tokenType) {
+				selection$.next({ source: null, target: null });
+			} else {
+				if (isValidSecondClick(cur.source, node)) {
+					selection$.next({ source: cur.source, target: node });
+				} else {
+					// Invalid second click: flash appropriate element and clear selection
+					if (node.type === 'TOP') {
+						if (topBarEl) {
+							topBarEl.classed('invalid-pulse', true);
+							setTimeout(() => topBarEl.classed('invalid-pulse', false), 1000);
+						}
+					} else {
+						flashInvalid(node);
+					}
+					selection$.next({ source: null, target: null });
+				}
+			}
+			return;
+		}
+		// If both set, start a new selection; TOP cannot be a first selection
+		if (type === 'TOP') {
+			if (topBarEl) {
+				topBarEl.classed('invalid-pulse', true);
+				setTimeout(() => topBarEl.classed('invalid-pulse', false), 1000);
+			}
+			selection$.next({ source: null, target: null });
+			return;
+		}
+		selection$.next({ source: node, target: null });
+	}
+
+	function drawEdges(edges, globalThreshold, currentPruningState) {
+		if (!edgesGroup) {
+			console.error("Edges group is not defined. Ensure onMount has initialized the SVG element.");
+			return;
+		}
+
+		// Clear all existing edges first
+		edgesGroup.selectAll(".edge-line").remove();
+
+		// Create a scale for edge thickness based on proportion (0 to 1)
+		const thicknessScale = d3.scaleLinear()
+			.domain([0, 1]) // proportion range
+			.range([0.5, 4]); // thickness range
+
+		const numLayers = 24;
+		const barY = margin.top + topBarOffset; // bar is now below the text
+
+		edges.forEach(({ x1, y1, x2, y2, nigValue, layer, count, total, srcToken, tgtToken, globalCutoff, shouldBeRed }) => {
+			const x1Pos = margin.left + x1 * gridSize + gridSize / 2;
+			let y1Pos = margin.top + y1 * gridSize + gridSize / 2 + yShift;
+			const x2Pos = margin.left + x2 * gridSize + gridSize / 2;
+			let y2Pos = margin.top + y2 * gridSize + gridSize / 2 + yShift;
+
+			// If y2 is negative (above the grid), connect to the top bar
+			if (y2 < 0) {
+				y2Pos = barY + barHeight / 2; // Connect to middle of the bar
+			}
+
+			// Create edge ID for pruning tracking
+			const edgeId = `${layer}_${srcToken}_${tgtToken}`;
+			const isPruned = prunedEdges.has(edgeId);
+
+			// Only draw edge if proportion > 0
+			if (nigValue > 0) {
+				// Determine edge color: manually pruned takes precedence
+				const edgeColor = isPruned ? 'red' : (shouldBeRed ? 'darkred' : 'black');
+				const edgeOpacity = isPruned ? 0.3 : 0.8;
+				
+							const line = edgesGroup.append("line")
+					.attr("x1", x1Pos)
+					.attr("y1", y1Pos)
+					.attr("x2", x2Pos)
+					.attr("y2", y2Pos)
+					.attr("stroke", edgeColor)
+					.attr("stroke-width", thicknessScale(nigValue)) // Use proportion for thickness
+					.attr("stroke-opacity", edgeOpacity)
+					.attr("stroke-linecap", "round")
+					.attr("class", "edge-line")
+					.attr("data-stroke", edgeColor)
+					.attr("data-layer", layer || '')
+					.attr("data-srcToken", srcToken || '')
+					.attr("data-tgtToken", tgtToken || '')
+					.attr("data-edge-id", edgeId)
+					.attr("data-to-bar", y2 < 0 ? '1' : '0');
+
+			const layerNum = (() => {
+				if (typeof layer === "string") {
+					const m = layer.match(/layer\.(\d+)/);
+					if (m) return m[1];
+				}
+				return layer ?? '';
+			})();
+			
+			// Determine if this is ATTN or FFN
+			const tooltipComponentType = layer?.includes('attention') ? 'ATTN' : 'FFN';
+			
+			// Enhanced tooltip with count and layer information
+			let tooltipHTML = `<b>Layer ${layerNum} ${tooltipComponentType}</b><br>` +
+				`${srcToken} → ${tgtToken}<br>` +
+				`Count: ${count}/${total} (${(nigValue * 100).toFixed(1)}%)<br>` +
+				`Global threshold: ${(globalThreshold * 100).toFixed(1)}%<br>` +
+				`Global cutoff: ${globalCutoff ? globalCutoff.toFixed(6) : 'N/A'}`;
+			
+			if (isPruned) {
+				tooltipHTML += `<br><b>Manually pruned</b>`;
+			}
+			
+			// Add pruning information if enabled
+			if (currentPruningState.enabled) {
+				const pruningThreshold = tooltipComponentType === 'ATTN' ? currentPruningState.thresholds.attention : currentPruningState.thresholds.ffn;
+				tooltipHTML += `<br>Pruning threshold: ${(pruningThreshold * 100).toFixed(1)}%`;
+				tooltipHTML += `<br>Would be pruned: ${shouldBeRed ? 'Yes' : 'No'}`;
+			}
+			
+			// Custom tooltip on both line and hit target
+				const tooltip = d3.select(architectureTooltipEl);
+
+				// Larger transparent hover target
+				const hit = edgesGroup.append('line')
+					.attr('x1', x1Pos)
+					.attr('y1', y1Pos)
+					.attr('x2', x2Pos)
+					.attr('y2', y2Pos)
+					.attr('stroke', 'transparent')
+				.attr('stroke-width', Math.max(10, thicknessScale(nigValue) * 3))
+				.attr('class', 'edge-line-hit')
+				.on('mouseover', function(event) {
+						line.attr('stroke-opacity', 1).attr('stroke-width', Math.max(2, thicknessScale(nigValue)+1));
+						tooltip.style('opacity', 1).html(tooltipHTML);
+					})
+					.on('mousemove', function(event) {
+						const px = Math.min(window.innerWidth - 200, (event.pageX || 0) + 12);
+						const py = Math.min(window.innerHeight - 120, (event.pageY || 0) + 12);
+						tooltip.style('left', `${px}px`).style('top', `${py}px`);
+					})
+					.on('mouseout', function() {
+						line.attr('stroke-opacity', edgeOpacity).attr('stroke-width', thicknessScale(nigValue));
+						tooltip.style('opacity', 0);
+					});
+			}
+		});
+	}
+
+	const gridSize = 80;
+	const margin = { top: 40, right: 20, bottom: 60, left: 100 };
+
+	onMount(() => {
+		// Create custom tooltip element
+		architectureTooltipEl = document.createElement('div');
+		architectureTooltipEl.className = 'heatmap-tooltip';
+		architectureTooltipEl.style.opacity = '0';
+		document.body.appendChild(architectureTooltipEl);
+
+		// Set fixed grid size and margins
+
+		const numLayers = 24;
+		const svgWidth = 800;
+		const svgHeight = margin.top + margin.bottom + numLayers * gridSize + yShift;
+
+		svg = d3.select("#architecture-grid")
+			.append("svg")
+			.attr("width", "100%")
+			.attr("height", svgHeight)
+			.attr("viewBox", `0 0 ${svgWidth} ${svgHeight}`)
+			.attr("preserveAspectRatio", "xMinYMin meet")
+			.style("display", "block");
+
+			// Define arrow marker for flow indication
+			const defs = svg.append('defs');
+			defs.append('marker')
+				.attr('id', 'arrow-green')
+				.attr('markerWidth', 6)
+				.attr('markerHeight', 6)
+				.attr('refX', 4)
+				.attr('refY', 3)
+				.attr('orient', 'auto')
+				.append('path')
+				.attr('d', 'M0,0 L0,6 L6,3 z')
+				.attr('fill', '#22C55E');
+
+		// Add hollow bar for final edges to connect into
+		const barY = margin.top + topBarOffset;
+		const barStroke = 2;
+		const barX = margin.left ; // Center the bar with respect to the first token
+		const barWidth = gridSize * 5 ;
+
+		edgesGroup = svg.append("g").attr("class", "edges-group");
+
+		topBarEl = svg.append("rect")
+			.attr("x", barX)
+			.attr("y", barY)
+			.attr("width", barWidth)
+			.attr("height", barHeight)
+			.attr("fill", "rgba(0,0,0,0)")
+			.attr("stroke", "#888")
+			.attr("stroke-width", barStroke)
+			.attr("rx", 6)
+			.attr("ry", 6)
+			.attr("class", "top-bar")
+			.style("cursor", "pointer")
+			.on("click", function (event) {
+				const [mx] = d3.pointer(event, this);
+				const localX = Math.max(0, Math.min(mx - barX, barWidth - 1));
+				const tokenIndex = Math.floor(localX / gridSize);
+				const tokenTypes = ['cls', 'qry', 'sep1', 'doc', 'sep2'];
+				const tokenType = tokenTypes[tokenIndex];
+				// Treat bar as a special TOP target; keep layer 11 implicit for table lookup
+				handleClick(11, 'TOP', tokenType);
+			});
+
+
+
+		const sub = combineLatest([edges$, threshold$, pruningState$]).subscribe(
+	([edges, threshold, pruningState]) => {
+			console.log(`VIEW SUBSCRIPTION UPDATE:`);
+			console.log(`  Edges received: ${edges ? edges.length : 'null'}`);
+			console.log(`  Threshold: ${threshold}`);
+			console.log(`  Pruning enabled: ${pruningState?.enabled}`);
+			
+			if (edges && edges.length > 0) {
+				console.log(`  Drawing ${edges.length} edges`);
+				drawEdges(edges, threshold, pruningState);
+				// After drawing edges, ensure selection highlight is consistent
+	updateSelectionHighlight();
+				// Scroll to bottom when NIGs/edges are loaded or updated
+				scrollToBottom();
+			} else {
+				console.log(`  Clearing edges (edges: ${edges ? edges.length : 'null'})`);
+				// Clear edges if no data
+				if (edgesGroup) {
+					edgesGroup.selectAll(".edge-line").remove();
+				}
+			}
+		}
+		);
+
+  		onDestroy(() => {
+			sub.unsubscribe();
+			if (errorSub) errorSub.unsubscribe();
+			if (architectureTooltipEl && architectureTooltipEl.parentNode) {
+				architectureTooltipEl.parentNode.removeChild(architectureTooltipEl);
+			}
+			architectureTooltipEl = null;
+			// Reset cursor on destroy
+			document.body.style.cursor = '';
+		});
+		
+		const tokenTypes = ['cls', 'qry', 'sep1', 'doc', 'sep2'];
+		const layers = Array.from({ length: numLayers }, (_, i) => numLayers - 1 - i);
+
+
+		// Add circles for ATTN layers and squares for FFN layers
+		layers.forEach((layer, layerIndex) => {
+			tokenTypes.forEach((tokenType, tokenIndex) => {
+				if (layer % 2 === 0) {
+					const nodeId = `L${Math.floor(layer / 2)}_ATTN_${tokenType}`;
+					svg.append("circle")
+						.attr("cx", margin.left + tokenIndex * gridSize + gridSize / 2)
+						.attr("cy", margin.top + layerIndex * gridSize + gridSize / 2 + yShift)
+						.attr("r", gridSize / 4)
+						.attr("fill", "gray")
+						.attr("stroke", "white")
+						.attr("stroke-opacity", 0.8)
+						.attr("stroke-width", 3)
+						.attr("class", "attn-circle")
+						.attr("data-layer", Math.floor(layer / 2))
+						.attr("data-token", tokenIndex)
+						.attr("data-node-id", nodeId)
+						.style("cursor", "pointer")
+						.on("mouseover", function () {
+							d3.select(this)
+								.transition()
+								.duration(200)
+								.attr("r", gridSize / 3);
+						})
+						.on("mouseout", function () {
+							d3.select(this)
+								.transition()
+								.duration(200)
+								.attr("r", gridSize / 4);
+						})
+						.on("click", (event) => {
+							if (pruningCursorEnabled) {
+								event.stopPropagation();
+								handleNodeClick(nodeId);
+							} else {
+								handleClick(Math.floor(layer / 2), 'ATTN', tokenType);
+							}
+						});
+				} else {
+					const nodeId = `L${Math.floor(layer / 2)}_FFN_${tokenType}`;
+					svg.append("rect")
+						.attr("x", margin.left + tokenIndex * gridSize + (gridSize - gridSize / 2) / 2)
+						.attr("y", margin.top + layerIndex * gridSize + (gridSize - gridSize / 2) / 2 + yShift)
+						.attr("width", gridSize / 2)
+						.attr("height", gridSize / 2)
+						.attr("fill", "darkgray")
+						.attr("stroke", "white")
+						.attr("stroke-width", 3)
+						.attr("class", "ffn-square")
+						.attr("data-layer", Math.floor(layer / 2))
+						.attr("data-token", tokenIndex)
+						.attr("data-node-id", nodeId)
+						.style("cursor", "pointer")
+						.each(function () {
+							const rect = d3.select(this);
+							rect.attr("data-original-x", rect.attr("x"));
+							rect.attr("data-original-y", rect.attr("y"));
+						})
+						.on("mouseover", function () {
+							const rect = d3.select(this);
+							const originalX = parseFloat(rect.attr("data-original-x"));
+							const originalY = parseFloat(rect.attr("data-original-y"));
+							const increase = (gridSize / 1.5 - gridSize / 2) / 2;
+							rect.transition()
+								.duration(200)
+								.attr("width", gridSize / 1.5)
+								.attr("height", gridSize / 1.5)
+							.attr("x", originalX - increase)
+							.attr("y", originalY - increase);
+					})
+					.on("mouseout", function () {
+						const rect = d3.select(this);
+						const originalX = rect.attr("data-original-x");
+						const originalY = rect.attr("data-original-y");
+						rect.transition()
+							.duration(200)
+							.attr("width", gridSize / 2)
+							.attr("height", gridSize / 2)
+							.attr("x", originalX)
+							.attr("y", originalY);
+					})
+					.on("click", () => {
+						handleClick(Math.floor(layer / 2), 'FFN', tokenType);
+					});
+			}
+		});
+	});
+
+	// Add token labels at the bottom
+	svg.selectAll(".token-label-bottom")
+		.data(tokenTypes)
+		.enter()
+		.append("text")
+			.attr("x", (_, i) => margin.left + i * gridSize + gridSize / 2)
+			.attr("y", svgHeight - margin.bottom + 20)
+			.attr("text-anchor", "middle")
+			.text(d => d)
+			.attr("class", "token-label-bottom");
+
+		// Add token labels at the top
+		svg.selectAll(".token-label-top")
+			.data(tokenTypes)
+			.enter()
+			.append("text")
+			.attr("x", (_, i) => margin.left + i * gridSize + gridSize / 2)
+			.attr("y", barY - 5) // Position above the top bar (updated with offset)
+			.attr("text-anchor", "middle")
+			.text(d => d)
+			.attr("class", "token-label-top");
+
+		svg.selectAll(".layer-label")
+			.data(layers)
+			.enter()
+			.append("text")
+			.attr("x", margin.left - 50)
+			.attr("y", (d, i) => {
+				const center = margin.top + i * gridSize + gridSize / 2 + yShift;
+				// For both ATTN and FFN, place label above the row (between row and its target above)
+				return center - gridSize / 2 + 4;
+			})
+			.attr("text-anchor", "middle")
+			.text(d => `L${Math.floor(d / 2)} ${d % 2 === 0 ? 'ATTN' : 'FFN'}`)
+			.attr("class", "layer-label")
+			.style('cursor', 'pointer')
+			.on('click', function(event, d){
+				const L = Math.floor(d/2);
+				const type = (d % 2 === 0) ? 'ATTN' : 'FFN';
+				if (labelClick$ && typeof labelClick$.next === 'function') {
+					labelClick$.next({ layer: L, type });
+				}
+			});
+	// Initial highlight attempt (in case selection existed before mount)
+	updateSelectionHighlight();
+	// Initial node colors (in case color data/mode existed before mount)
+	updateNodeColors();
+	// Scroll to bottom on initial load
+	scrollToBottom();
+	});
+</script>
+
+<div>
+	<div id="architecture-grid" style="width: 100%; height: 100%;"></div>
+</div>
+
+
+<style>
+	/* Make the architecture grid scrollable */
+	#architecture-grid {
+		width: 100%;
+		height: 100%;
+		overflow: auto;
+		border: 1px solid #ddd;
+		border-radius: 4px;
+		min-width: 0;
+		min-height: 0;
+	}
+		@keyframes pulseGrow {
+	0% { filter: drop-shadow(0 0 0px #22C55E); }
+	50% { filter: drop-shadow(0 0 10px #22C55E); }
+	100% { filter: drop-shadow(0 0 0px #22C55E); }
+}
+	@keyframes invalidFlash {
+		0% { filter: drop-shadow(0 0 0px darkred); stroke: darkred; }
+		50% { filter: drop-shadow(0 0 10px darkred); stroke: darkred; }
+		100% { filter: drop-shadow(0 0 0px darkred); stroke: darkred; }
+	}
+
+	:global(.invalid-pulse) {
+		animation: invalidFlash 1s ease-in-out;
+	}
+		:global(rect.top-bar.invalid-pulse) {
+			stroke: darkred !important;
+		}
+
+ :global(.pulse) {
+	animation: pulseGrow 1.6s ease-in-out infinite;
+}
+
+ :global(.edge-highlight) {
+	stroke: #22C55E;
+}
+
+ :global(.top-bar) {
+	transition: stroke 0.2s ease;
+}
+
+ /* Custom tooltip styling to match heatmap tooltips */
+ :global(.heatmap-tooltip) {
+	position: absolute;
+	pointer-events: none;
+	background: white;
+	border: 1px solid #ccc;
+	border-radius: 4px;
+	padding: 6px 8px;
+	font-size: 12px;
+	box-shadow: 0 2px 4px rgba(0,0,0,0.08);
+	z-index: 9999;
+	transition: opacity 0.2s ease;
+}
+</style>
