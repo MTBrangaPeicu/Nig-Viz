@@ -6,6 +6,7 @@ RUN apk add --no-cache git pnpm
 USER node
 WORKDIR /home/node
 ENV NODE_ENV=production
+ENV SERVER=dev
 
 RUN git clone -b develop https://github.com/marcellejs/marcelle.git --depth 1 \
     && cd marcelle \
@@ -14,4 +15,6 @@ RUN git clone -b develop https://github.com/marcellejs/marcelle.git --depth 1 \
 COPY --chown=node:node . ./Nig-Viz
 
 WORKDIR /home/node/Nig-Viz
-RUN pnpm install 
+RUN pnpm install
+
+ENTRYPOINT ["sh","-c", "npm run $SERVER"]

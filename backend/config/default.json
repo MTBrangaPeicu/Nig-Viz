@@ -9,7 +9,7 @@
     "default": 10,
     "max": 50
   },
-  "mongodb": "mongodb://localhost:27017/mihai_datastore_example",
+  "mongodb": "mongodb://localhost:27017/nig_viz",
   "whitelist": {
     "services": "*",
     "assets": [
