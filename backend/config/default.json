@@ -23,8 +23,8 @@
     ]
   },
   "authentication": {
-    "enabled": false,
-    "allowSignup": false,
+    "enabled": true,
+    "allowSignup": true,
     "entity": "user",
     "service": "users",
     "secret": "QnksTHWnxvIcN74yeDHf18sMYGr8565j",
@@ -56,21 +56,7 @@
     "admin": [
       {
         "action": "manage",
-        "subject": "all",
-        "conditions": {
-          "userId": "${user._id}"
-        }
-      },
-      {
-        "action": "manage",
-        "subject": "all",
-        "conditions": {
-          "public": "${true}"
-        }
-      },
-      {
-        "action": "manage",
-        "subject": "users"
+        "subject": "all"
       }
     ],
     "editor": [
@@ -82,11 +68,49 @@
         }
       },
       {
-        "action": "manage",
+        "action": "read",
         "subject": "all",
         "conditions": {
           "public": "${true}"
         }
+      },
+      {
+        "action": "manage",
+        "subject": "nig-snapshots",
+        "conditions": {
+          "userId": "${user._id}"
+        }
+      },
+      {
+        "action": "manage",
+        "subject": "prune-snapshots",
+        "conditions": {
+          "userId": "${user._id}"
+        }
+      },
+      {
+        "action": "manage",
+        "subject": "predictions"
+      },
+      {
+        "action": "manage",
+        "subject": "nig-values"
+      },
+      {
+        "action": "manage",
+        "subject": "forward-pass"
+      },
+      {
+        "action": "manage",
+        "subject": "pruned-forward-pass"
+      },
+      {
+        "action": "manage",
+        "subject": "conditional-nig"
+      },
+      {
+        "action": "manage",
+        "subject": "msmarco-samples"
       },
       {
         "action": "read",
@@ -101,14 +125,6 @@
         "conditions": {
           "_id": "${user._id}"
         }
-      },
-      {
-        "action": "delete",
-        "subject": "users",
-        "conditions": {
-          "_id": "${user._id}"
-        },
-        "inverted": "true"
       }
     ],
     "anonymous": [

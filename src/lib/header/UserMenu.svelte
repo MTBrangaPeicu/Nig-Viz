@@ -1,26 +1,20 @@
 <script lang="ts">
+  import { goto } from '$app/navigation';
   import { base } from '$app/paths';
-  import { store } from '$lib/marcelle/store';
-  import type { User } from '@marcellejs/core';
-  import type { Subscription } from 'rxjs/internal/Subscription';
-  import { onDestroy, onMount } from 'svelte';
+  import { store, user } from '$lib/marcelle/store';
+  import type { User } from '$lib/declarations';
 
-  let user: User;
-
-  let sub: Subscription;
-  onMount(() => {
-    sub = store.$status.subscribe((s) => {
-      if (s === 'connected') {
-        console.log(store.user);
-        user = store.user as User;
-      }
-    });
+  // Reactive user value from the store
+  let currentUser: User | undefined;
+  user.subscribe((u) => {
+    currentUser = u;
   });
 
-  onDestroy(() => sub.unsubscribe());
-
   function logout() {
-    store.logout();
+    store.logout().then(() => {
+      // Redirect to login page after logout
+      goto(`${base}/login`);
+    });
   }
 </script>
 
@@ -46,20 +40,18 @@
   <ul
     class="mt-3 z-[1] p-2 shadow menu menu-sm dropdown-content bg-base-100 rounded-box w-64"
   >
-    {#if !user || user?.role === 'anonymous'}
-      <li><a href="{base}/login">Login</a></li>
-    {:else}
+    {#if currentUser && currentUser?.role !== 'anonymous'}
       <li class="menu-title">
-        <span>Bonjour, <strong>{user?.email}</strong></span>
+        <span>Hello, <strong>{currentUser?.username || currentUser?.email}</strong></span>
       </li>
       <li>
         <button class="justify-between">
-          Préférences
-          <span class="badge badge-success">Nouveau!</span>
+          Preferences
+          <span class="badge badge-success">New!</span>
         </button>
       </li>
       <li>
-        <button on:click={logout} class="btn-error">Me déconnecter</button>
+        <button on:click={logout} class="btn-error">Logout</button>
       </li>
     {/if}
   </ul>

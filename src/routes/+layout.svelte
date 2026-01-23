@@ -1,5 +1,7 @@
 <script lang="ts">
   import '../app.css';
+  import '@marcellejs/core/dist/marcelle.css';
+
   interface Props {
     children?: import('svelte').Snippet;
   }

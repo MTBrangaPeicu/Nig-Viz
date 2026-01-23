@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { get, writable } from 'svelte/store';
+  import { goto } from '$app/navigation';
+  import { base } from '$app/paths';
   import { Pane, Splitpanes } from 'svelte-splitpanes';
   import { toggle } from '@marcellejs/gui-widgets';
   import {
@@ -12,8 +14,11 @@
     ConditionalNigPanel,
     OutputConsole
   } from '$lib/layout';
+  import UserMenu from '$lib/header/UserMenu.svelte';
   import { architecture, nigtable, logThresholdSlider, distributionChart, ecdfChart, betterText, betterNumber, subsetButtons } from '$lib/marcelle/components';
   import { nigConnection } from '$lib/services/nig-connection';
+  import { snapshotManager } from '$lib/services/nig-snapshots';
+  import { pruneSnapshotManager } from '$lib/services/prune-snapshots';
   import {
     nigData,
     selection,
@@ -21,6 +26,33 @@
     useAbsoluteValues,
     architectureNodeColors
   } from '$lib/stores';
+  import { store, isAuthenticated } from '$lib/marcelle/store';
+
+  // Check authentication on mount
+  let authChecked = $state(false);
+  
+  onMount(async () => {
+    try {
+      await store.connect();
+      // Check if user is authenticated (not anonymous)
+      if (!store.user || store.user.role === 'anonymous') {
+        goto(`${base}/login`);
+        return;
+      }
+      authChecked = true;
+      
+      // Reload snapshot managers now that we're authenticated
+      snapshotManager.reload();
+      pruneSnapshotManager.reload();
+      
+      // Request initial samples now that we're authenticated
+      const subset = subsetButtonsComponent.$value.getValue() || 'Random';
+      nigConnection.requestSamples({ n: 10, subset });
+    } catch (error) {
+      // Not authenticated, redirect to login
+      goto(`${base}/login`);
+    }
+  });
 
   // State for which sidebar panel is active
   let activeSidebarPanel = $state('input'); // Always holds the selected panel ID
@@ -280,7 +312,7 @@
     
     // Subscribe to subset button changes
     const subsetSub = subsetButtonsComponent.$value.subscribe((subset: string) => {
-      if (!subset) return;
+      if (!subset || !authChecked) return; // Wait for auth before requesting samples
       const currentQuery = queryInputComponent.$value.getValue();
       if (nigConnection.selectedQueryId) {
         nigConnection.requestSamples({ subset, query_id: nigConnection.selectedQueryId });
@@ -291,7 +323,7 @@
     
     // Subscribe to query changes
     const querySub = queryInputComponent.$value.subscribe((query: string) => {
-      if (!query || !queryInputComponent.samples) return;
+      if (!query || !queryInputComponent.samples || !authChecked) return; // Wait for auth
       const selectedSample = queryInputComponent.samples.find((s: any) => s.query === query);
       if (selectedSample) {
         nigConnection.selectedQueryId = selectedSample.query_id;
@@ -822,6 +854,9 @@
         <button class="tab tab-active">Main</button>
         <!-- Future tabs will go here -->
       </div>
+    </div>
+    <div class="flex items-center">
+      <UserMenu />
     </div>
   </div>
 

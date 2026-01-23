@@ -31,6 +31,11 @@ export class NIGSnapshotManager {
     this.loadFromBackend();
   }
 
+  // Public method to reload snapshots (call after authentication)
+  reload() {
+    this.loadFromBackend();
+  }
+
   // Get total storage used by snapshots
   getTotalStorageKB(): number {
     return Math.round(this.totalStorageBytes / 1024);

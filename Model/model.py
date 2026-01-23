@@ -1,9 +1,14 @@
 import numpy as np
+import os
+from dotenv import load_dotenv
 from marcelle import DataStore
 import threading
 import random
 from collections import defaultdict
 import ir_datasets
+
+# Load environment variables (for account login & pwd)
+load_dotenv()
 from integrated_gradients import predict
 from neuron_integrated_gradients import nig_predict
 from aggregation import aggregate_nig  # Import aggregation logic
@@ -671,6 +676,6 @@ forward_service.on("created", handle_forward_pass_request)
 pruned_forward_service.on("created", handle_pruned_forward_pass_request)
 conditional_nig_service.on("created", handle_conditional_nig_request)
 
-# Connect and wait indefinitely
-store.connect()
+# Connect with authentication and wait indefinitely
+store.connect(os.getenv("MARCELLE_LOGIN"), os.getenv("MARCELLE_PWD"))
 store.wait()

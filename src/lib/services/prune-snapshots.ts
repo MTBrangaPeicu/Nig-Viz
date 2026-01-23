@@ -31,6 +31,11 @@ export class PruneSnapshotManager {
     this.loadFromBackend();
   }
 
+  // Public method to reload snapshots (call after authentication)
+  reload() {
+    this.loadFromBackend();
+  }
+
   // Load snapshots from backend
   private async loadFromBackend() {
     if (this.isLoading) return;
