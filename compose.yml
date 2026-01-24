@@ -1,23 +1,38 @@
 services:
-  app:
+  model:
+    build: ./Model
+    image: model-slim
+    depends_on:
+      - backend
+
+  front:
     build: .
     image: node_nig-viz
-    #ports:
-    #  - "5173:5173"
+    ports:
+      - "5173:5173"
+    depends_on:
+      - backend
+    environment:
+      - SERVER=dev
+
+  backend:
+    build: .
+    image: node_nig-viz
+    ports:
+      - "3030:3030"
     depends_on:
       - mongodb
     environment:
       - SERVER=backend
 
   mongodb:
-    image: mongo:8.2
+    #image: mongo:8.2
+    image: mongodb/mongodb-community-server
     restart: always
     volumes:
       - datastore:/data/db      
-    environment:
-      - MONGO_INITDB_ROOT_USERNAME=user
-      - MONGO_INITDB_ROOT_PASSWORD=pass
-      #- MONGO_INITDB_DATABASE=nig-viz
 
 volumes:
   datastore:
+
+
