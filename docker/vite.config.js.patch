@@ -1,0 +1,13 @@
+diff --git a/vite.config.js b/vite.config.js
+index 93bee6a..80c253a 100644
+--- a/vite.config.js
++++ b/vite.config.js
+@@ -15,5 +15,8 @@ export default defineConfig({
+ 	},
+ 	optimizeDeps: {
+ 		exclude: ['@marcellejs/backend']
++	},
++	server: {
++		host: true
+ 	}
+ });

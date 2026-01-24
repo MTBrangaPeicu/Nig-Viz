@@ -17,7 +17,11 @@ RUN git clone -b develop https://github.com/marcellejs/marcelle.git --depth 1 \
 COPY --chown=node:node . ./Nig-Viz
 
 WORKDIR /home/node/Nig-Viz
+
+# Apply changes to adapt the code for containerization 
 RUN sed -i 's/mongodb:\/\/localhost:/mongodb:\/\/mongodb:/g' ./backend/config/default.json
+RUN git apply ./docker/*.patch
+
 RUN pnpm install
 
 # Frontend port
