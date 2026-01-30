@@ -1,0 +1,13 @@
+Model/
+node_modules/
+# Git et IDE
+.git/
+.gitignore
+.vscode/
+.idea/
+*.swp
+# Docker
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+.env
