@@ -206,9 +206,7 @@ export class NIGConnection {
   }
 
   // Submit NIG prediction (from index.js lines 452-472)
-  submitNIG(params: { query: string; passage: string; passage2?: string; numReps: number; baselineLabel: string }) {
-    const passage = params.passage + (params.passage2 ? (' \n\n' + params.passage2) : '');
-    
+  submitNIG(params: { query: string; passage: string; numReps: number; baselineLabel: string }) {
     // Capture inputs at submit time for snapshot metadata (from index.js lines 457-462)
     this.lastNIGRequestInputs = {
       query: params.query,
@@ -219,7 +217,7 @@ export class NIGConnection {
 
     this.nigModelInstance.predict({
       query: params.query,
-      passage,
+      passage: params.passage,
       num_reps: params.numReps,
       baseline_type: this.getBaselineType(params.baselineLabel),
       type: 'nig'
@@ -285,6 +283,7 @@ export class NIGConnection {
     layerIdx: number;
     neuronIdx: number;
     neuronType: 'attention' | 'ffn';
+    sourceInputPart?: 'cls' | 'query' | 'sep_1' | 'document' | 'sep_2' | null;
     targetInputPart?: 'cls' | 'query' | 'sep_1' | 'document' | 'sep_2' | null;
   }) {
     console.log('[NIG CONNECTION] Submitting conditional NIG request:', params);
@@ -294,6 +293,7 @@ export class NIGConnection {
       layerIdx: params.layerIdx,
       neuronIdx: params.neuronIdx,
       neuronType: params.neuronType,
+      sourceInputPart: params.sourceInputPart,
       targetInputPart: params.targetInputPart
     };
     
@@ -304,6 +304,7 @@ export class NIGConnection {
       layer_idx: params.layerIdx,
       neuron_idx: params.neuronIdx,
       neuron_type: params.neuronType,
+      source_input_part: params.sourceInputPart || null,
       target_input_part: params.targetInputPart || null,
     });
   }

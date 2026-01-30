@@ -30,34 +30,34 @@ def filter_module(module: str, keywords: List[str]):
 
 def get_interesting_modules(model, list_regex: Optional[List[str]] = None) -> Dict:
     """
-    Returns a dictionnary containing the name of the interesting modules in the model.
+    Returns a list containing the name of the interesting modules in the model.
 
-    :return Dict: Dictionnary where the key is the module's name and the value is the number of out features.
+    :return Tuple[List, int]: List of module names and total number of neurons.
     """
     interesting_layers = ["self.dropout", "intermediate.dense"]
-    neurons_per_layers = dict() 
+    target_layer_names = list() 
     total_nb_of_neurons = 0
     for name, module in model.named_modules():
         if any(word in name for word in interesting_layers):
             if list_regex is not None:
                 if filter_module(name, list_regex):
                     if hasattr(module, 'out_features'):
-                        neurons_per_layers[name] = module.out_features
+                        target_layer_names.append(name)
                         total_nb_of_neurons += module.out_features
                     else:
                         # This corresponds to the dropout which is in fact used to target the attention_probs of shape [batch_size, num_heads, seq_length, seq_length].
                         # So number of neurons here is: num_heads * seq_length.
-                        neurons_per_layers[name] = model.config.num_attention_heads 
+                        target_layer_names.append(name)
                         total_nb_of_neurons += model.config.num_attention_heads
             else:
                 if hasattr(module, 'out_features'):
-                    neurons_per_layers[name] = module.out_features
+                    target_layer_names.append(name)
                     total_nb_of_neurons += module.out_features
                 else:
-                    neurons_per_layers[name] = model.config.num_attention_heads
+                    target_layer_names.append(name)
                     total_nb_of_neurons += model.config.num_attention_heads
 
-    return neurons_per_layers, total_nb_of_neurons
+    return target_layer_names, total_nb_of_neurons
 
 def get_token_types_spans(input, tokenizer) -> List[Tuple]:
     """Returns a list of spans corresponding to the positions in the input

@@ -262,19 +262,28 @@
 		
 		if (!isConditional || targetLayerIdx === null) return;
 		
-		// Grey out ATTN nodes for layers > targetLayerIdx
-		// Grey out FFN nodes for layers > targetLayerIdx OR (layer == targetLayerIdx AND target is ATTN)
+		// Selection logic depends on target neuron type:
+		// - If target is ATTENTION: source can be ATTN or FFN of same layer
+		//   → grey out ATTN > targetLayerIdx, FFN > targetLayerIdx
+		// - If target is FFN: source can be FFN of same layer OR ATTN of next layer
+		//   → grey out FFN > targetLayerIdx, ATTN > targetLayerIdx + 1
+		
+		const isTargetFFN = targetNeuronType === 'ffn';
+		
 		svg.selectAll('.attn-circle').each(function() {
 			const layer = parseInt(this.getAttribute('data-layer'));
-			if (layer > targetLayerIdx) {
+			// For FFN target: ATTN can be at targetLayerIdx + 1 (next layer)
+			// For ATTN target: ATTN can only be at targetLayerIdx (same layer)
+			const attnLimit = isTargetFFN ? targetLayerIdx + 1 : targetLayerIdx;
+			if (layer > attnLimit) {
 				d3.select(this).classed('greyed-out', true);
 			}
 		});
 		
 		svg.selectAll('.ffn-square').each(function() {
 			const layer = parseInt(this.getAttribute('data-layer'));
-			// FFN is greyed out if layer > target OR (layer == target AND target type is ATTN)
-			if (layer > targetLayerIdx || (layer === targetLayerIdx && targetNeuronType === 'attention')) {
+			// FFN always limited to targetLayerIdx (same layer) for both target types
+			if (layer > targetLayerIdx) {
 				d3.select(this).classed('greyed-out', true);
 			}
 		});

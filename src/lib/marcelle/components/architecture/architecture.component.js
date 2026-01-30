@@ -94,11 +94,13 @@ export class Architecture extends Component {
 					const nodeKey = `L${layerIndex}_${layerType}_${tokenType}`;
 					let maxVal = -Infinity;
 					
-					// Collect all values and find the maximum
+					// Collect all values and find the maximum (skip NaN values from conditional NIG)
 					for (let head = 0; head < layerData.length; head++) {
 						for (let tgtToken = 0; tgtToken < 5; tgtToken++) {
 							if (layerData[head] && layerData[head][tgtToken] && layerData[head][tgtToken][srcToken] !== undefined) {
 								const rawValue = layerData[head][tgtToken][srcToken];
+								// Skip NaN values (used by conditional NIG to mask non-target neurons)
+								if (!Number.isFinite(rawValue)) continue;
 								allValues.push(rawValue); // Keep original signed value for extent
 								
 								// Find max value (absolute if mode enabled, otherwise signed)
@@ -124,8 +126,10 @@ export class Architecture extends Component {
 					if (layerData[tokenIdx] && Array.isArray(layerData[tokenIdx])) {
 						let maxVal = -Infinity;
 						
-						// Collect all neuron values and find the maximum
+						// Collect all neuron values and find the maximum (skip NaN values from conditional NIG)
 						layerData[tokenIdx].forEach(rawValue => {
+							// Skip NaN values (used by conditional NIG to mask non-target neurons)
+							if (!Number.isFinite(rawValue)) return;
 							allValues.push(rawValue);
 							
 							// Find max value (absolute if mode enabled, otherwise signed)
@@ -227,6 +231,8 @@ export class Architecture extends Component {
 						for (let tgtToken = 0; tgtToken < 5; tgtToken++) {
 							if (layerData[head] && layerData[head][tgtToken] && layerData[head][tgtToken][srcToken] !== undefined) {
 								const rawValue = layerData[head][tgtToken][srcToken];
+								// Skip NaN values (used by conditional NIG to mask non-target neurons)
+								if (!Number.isFinite(rawValue)) continue;
 								const value = useAbsoluteValues ? Math.abs(rawValue) : rawValue;
 								allModelValues.push(value);
 								allAttentionValues.push(value);
@@ -238,7 +244,10 @@ export class Architecture extends Component {
 				// FFN layer: [5, neurons] - collect all neuron values
 				for (let tokenType = 0; tokenType < 5; tokenType++) {
 					if (layerData[tokenType] && Array.isArray(layerData[tokenType])) {
-						const values = layerData[tokenType].map(v => useAbsoluteValues ? Math.abs(v) : v);
+						// Filter out NaN values (used by conditional NIG to mask non-target neurons)
+						const values = layerData[tokenType]
+							.filter(v => Number.isFinite(v))
+							.map(v => useAbsoluteValues ? Math.abs(v) : v);
 						allModelValues.push(...values);
 						allFFNValues.push(...values);
 					}
@@ -326,6 +335,8 @@ export class Architecture extends Component {
 						for (let head = 0; head < layerData.length; head++) {
 							if (layerData[head] && layerData[head][tgtToken] && layerData[head][tgtToken][srcToken] !== undefined) {
 								const rawValue = layerData[head][tgtToken][srcToken];
+								// Skip NaN values (used by conditional NIG to mask non-target neurons)
+								if (!Number.isFinite(rawValue)) continue;
 								headValues.push(useAbsoluteValues ? Math.abs(rawValue) : rawValue);
 							}
 						}
@@ -368,7 +379,10 @@ export class Architecture extends Component {
 				// FFN layer: [5, neurons] - create edges from FFN to next layer's ATTN
 				for (let tokenType = 0; tokenType < 5; tokenType++) {
 					if (layerData[tokenType] && Array.isArray(layerData[tokenType])) {
-					const neuronValues = layerData[tokenType].map(v => useAbsoluteValues ? Math.abs(v) : v);
+					// Filter out NaN values (used by conditional NIG to mask non-target neurons)
+					const neuronValues = layerData[tokenType]
+						.filter(v => Number.isFinite(v))
+						.map(v => useAbsoluteValues ? Math.abs(v) : v);
 					if (neuronValues.length > 0) {
 						// Count how many neurons exceed the GLOBAL cutoff
 						// If threshold is 0, show no edges (count = 0)

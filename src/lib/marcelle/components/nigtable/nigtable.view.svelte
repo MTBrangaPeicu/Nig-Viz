@@ -237,13 +237,18 @@
 					: options.values;
 				if (!Array.isArray(attnMatrix)) return;
 				
-				// Compute score range for grey scale
-				const headScores = attnMatrix.map((row, i) => ({
-					index: i,
-					score: (row || []).reduce((a, b) => a + (b || 0), 0)
-				}));
-				const minScore = d3.min(headScores, d => d.score) || 0;
-				const maxScore = d3.max(headScores, d => d.score) || 1;
+				// Compute score range for grey scale (filter out NaN values)
+				const headScores = attnMatrix.map((row, i) => {
+					const finiteVals = (row || []).filter(v => Number.isFinite(v));
+					return {
+						index: i,
+						score: finiteVals.reduce((a, b) => a + b, 0),
+						hasData: finiteVals.length > 0
+					};
+				});
+				const finiteScores = headScores.filter(h => h.hasData).map(h => h.score);
+				const minScore = finiteScores.length > 0 ? d3.min(finiteScores) : 0;
+				const maxScore = finiteScores.length > 0 ? d3.max(finiteScores) : 1;
 				const greyScale = d3.scaleSequential(d3.interpolateGreys).domain([minScore, maxScore]).clamp(true);
 				
 				svg.selectAll('circle.row-dot')
@@ -252,6 +257,7 @@
 						if (shouldCircleBeRed(index, 'ATTN')) return 'darkred';
 						// Restore grey color based on score
 						const headData = headScores.find(h => h.index === index);
+						if (!headData?.hasData) return '#888'; // Grey for rows with no valid data
 						return greyScale(headData?.score || 0);
 					});
 			}
@@ -261,17 +267,19 @@
 		if (ffnHeatmapEl && layerType === 'FFN') {
 			const svg = d3.select(ffnHeatmapEl).select('svg');
 			if (!svg.empty() && Array.isArray(options.values)) {
-				// Compute NIG range for color scale
-				const nigBase = options.values.map((v, i) => ({ index: i, val: v }));
-				const nigMin = d3.min(nigBase, d => d.val) || 0;
-				const nigMax = d3.max(nigBase, d => d.val) || 1;
+				// Compute NIG range for color scale (filter out NaN values)
+				const nigBase = options.values.map((v, i) => ({ index: i, val: v, isFinite: Number.isFinite(v) }));
+				const finiteVals = nigBase.filter(d => d.isFinite).map(d => d.val);
+				const nigMin = finiteVals.length > 0 ? d3.min(finiteVals) : 0;
+				const nigMax = finiteVals.length > 0 ? d3.max(finiteVals) : 1;
 				
 				svg.selectAll('circle.row-dot')
 					.attr('fill', function(d) {
 						const index = d?.index ?? d;
 						if (shouldCircleBeRed(index, 'FFN')) return 'darkred';
 						// Restore original color based on NIG value
-						const val = nigBase[index]?.val ?? 0;
+						const val = nigBase[index]?.val;
+						if (!Number.isFinite(val)) return '#888'; // Grey for NaN values
 						if (nigMin < 0 && nigMax > 0) {
 							return getColorScale(val, nigMin, nigMax);
 						}
@@ -328,20 +336,29 @@
 		const sourceValsForSort = (heatmapMetric === 'activation' && Array.isArray(options.activations))
 			? options.activations
 			: options.values;
-		// Always use actual values for sorting, not absolute
+		// Always use actual values for sorting, not absolute. Mark NaN values for special handling.
 		const base = sourceValsForSort.map((val, i) => ({ 
 			index: i, 
-			val: val
+			val: val,
+			isNaN: !Number.isFinite(val)
 		}));
 		const dir = ffnSort.dir === 'asc' ? 1 : -1;
-		const cmpNum = (x, y) => (x < y ? -1 : x > y ? 1 : 0);
+		// NaN values sort to the end
+		const cmpNum = (x, y) => {
+			if (!Number.isFinite(x) && !Number.isFinite(y)) return 0;
+			if (!Number.isFinite(x)) return 1;  // NaN to end
+			if (!Number.isFinite(y)) return -1; // NaN to end
+			return x < y ? -1 : x > y ? 1 : 0;
+		};
 		if (ffnSort.key === 'index') {
 			sortedFFN = base.slice().sort((a, b) => dir * cmpNum(a.index, b.index));
 		} else {
 			sortedFFN = base.slice().sort((a, b) => dir * cmpNum(a.val, b.val));
 		}
-		minFFN = Math.min(...base.map(x => x.val));
-		maxFFN = Math.max(...base.map(x => x.val));
+		// Filter out NaN for min/max calculations
+		const finiteVals = base.filter(x => Number.isFinite(x.val)).map(x => x.val);
+		minFFN = finiteVals.length > 0 ? Math.min(...finiteVals) : 0;
+		maxFFN = finiteVals.length > 0 ? Math.max(...finiteVals) : 1;
 	} else {
 		sortedFFN = [];
 		minFFN = 0;
@@ -358,22 +375,39 @@
 		const sourceValsForSort = (heatmapMetric === 'activation' && Array.isArray(options.attnActivations))
 			? options.attnActivations
 			: options.values;
-		// Always use actual values for sorting, not absolute
-		const base = sourceValsForSort.map((row, i) => ({ 
-			index: i, 
-			row: row,
-			score: row.reduce((a, b) => a + b, 0) 
-		}));
+		// Always use actual values for sorting, not absolute. Handle NaN values.
+		const base = sourceValsForSort.map((row, i) => {
+			// Filter out NaN values from each row when computing score
+			const finiteVals = (row || []).filter(v => Number.isFinite(v));
+			return { 
+				index: i, 
+				row: row,
+				score: finiteVals.reduce((a, b) => a + b, 0),
+				hasData: finiteVals.length > 0
+			};
+		});
 		const dir = attnSort.dir === 'asc' ? 1 : -1;
-		const cmpNum = (x, y) => (x < y ? -1 : x > y ? 1 : 0);
+		// Sort heads with no data to the end
+		const cmpNum = (x, y, hasDataA, hasDataB) => {
+			if (!hasDataA && !hasDataB) return 0;
+			if (!hasDataA) return 1;  // No data to end
+			if (!hasDataB) return -1; // No data to end
+			return x < y ? -1 : x > y ? 1 : 0;
+		};
 		if (typeof attnSort.column === 'number') {
 			const col = attnSort.column;
-			scoredHeads = base.slice().sort((a, b) => dir * cmpNum((a.row[col] ?? 0), (b.row[col] ?? 0)));
+			scoredHeads = base.slice().sort((a, b) => {
+				const aVal = a.row?.[col];
+				const bVal = b.row?.[col];
+				return dir * cmpNum(aVal ?? 0, bVal ?? 0, Number.isFinite(aVal), Number.isFinite(bVal));
+			});
 		} else {
 			scoredHeads = base.slice(); // no sort when column unspecified
 		}
-		minHeadScore = Math.min(...scoredHeads.map(x => x.score));
-		maxHeadScore = Math.max(...scoredHeads.map(x => x.score));
+		// Filter out heads with no data for min/max calculations
+		const finiteScores = scoredHeads.filter(x => x.hasData).map(x => x.score);
+		minHeadScore = finiteScores.length > 0 ? Math.min(...finiteScores) : 0;
+		maxHeadScore = finiteScores.length > 0 ? Math.max(...finiteScores) : 1;
 	} else {
 		scoredHeads = [];
 		minHeadScore = 0;
@@ -581,8 +615,8 @@
 			.attr('width', x.bandwidth())
 			.attr('height', y.bandwidth())
 			.style('stroke', 'none')
-			.style('opacity', 0.95)
-			.attr('fill', d => color(d.value))
+			.style('opacity', d => Number.isFinite(d.value) ? 0.95 : 0.3)
+			.attr('fill', d => Number.isFinite(d.value) ? color(d.value) : '#888')
 			.on('mouseover', function (event, d) {
 				d3.select(this).style('stroke', '#333').style('stroke-width', 1);
 				tooltip.style('opacity', 1)
@@ -610,7 +644,10 @@
 			.attr('stroke', '#ccc')
 			.attr('fill', (h) => {
 				if (shouldCircleBeRed(h.index, 'ATTN')) return 'darkred';
-				const score = (h.row || []).reduce((a, b) => a + (b || 0), 0);
+				// Filter out NaN values when computing score
+				const finiteVals = (h.row || []).filter(v => Number.isFinite(v));
+				if (finiteVals.length === 0) return '#888'; // Grey for rows with all NaN
+				const score = finiteVals.reduce((a, b) => a + b, 0);
 				// Use grey scale (independent of heatmap color scheme)
 				const greyScale = d3.scaleSequential(d3.interpolateGreys).domain([minHeadScore, maxHeadScore]).clamp(true);
 				return greyScale(score);
@@ -791,10 +828,13 @@
 			.attr('stroke', '#ccc')
 			.attr('fill', i => {
 				if (shouldCircleBeRed(i, 'FFN')) return 'darkred';
+				const val = nigBase[i]?.val;
+				// Handle NaN values with grey color
+				if (!Number.isFinite(val)) return '#888';
 				// Always use NIG scale for dots, regardless of heatmapMetric
-				if (nigMin < 0 && nigMax > 0) return getColorScale(nigBase[i]?.val ?? 0, nigMin, nigMax);
+				if (nigMin < 0 && nigMax > 0) return getColorScale(val, nigMin, nigMax);
 				const gry = d3.scaleSequential(d3.interpolateInferno).domain([nigMin, nigMax]).clamp(true);
-				return gry(nigBase[i]?.val ?? 0);
+				return gry(val);
 			});
 		// Neuron labels
 		gLeft.selectAll('text.row-neuron')
@@ -818,8 +858,8 @@
 			.attr('width', perColW)
 			.attr('height', y.bandwidth())
 			.style('stroke', 'none')
-			.style('opacity', 0.95)
-			.attr('fill', d => nigColor(d.val))
+			.style('opacity', d => Number.isFinite(d.val) ? 0.95 : 0.3)
+			.attr('fill', d => Number.isFinite(d.val) ? nigColor(d.val) : '#888')
 			.on('mouseover', function (event, d) {
 				d3.select(this).style('stroke', '#333').style('stroke-width', 1);
 				d3.select(attnTooltipEl).style('opacity', 1)
@@ -848,8 +888,8 @@
 				.attr('width', perColW)
 				.attr('height', y.bandwidth())
 				.style('stroke', 'none')
-				.style('opacity', 0.95)
-				.attr('fill', d => actColor(d.val))
+				.style('opacity', d => Number.isFinite(d.val) ? 0.95 : 0.3)
+				.attr('fill', d => Number.isFinite(d.val) ? actColor(d.val) : '#888')
 				.on('mouseover', function (event, d) {
 					d3.select(this).style('stroke', '#333').style('stroke-width', 1);
 					d3.select(attnTooltipEl).style('opacity', 1)

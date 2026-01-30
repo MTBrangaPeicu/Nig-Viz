@@ -6,6 +6,7 @@ import type { User } from '$lib/declarations';
 // Make sure to run: pnpm backend
 export const user = writable<User | undefined>(undefined);
 export const store = dataStore('http://localhost:3030');
+//export const store = dataStore('https://marcelle.lisn.upsaclay.fr/nig-viz/api/');
 
 // Track if user is authenticated (not anonymous)
 export const isAuthenticated = writable<boolean>(false);

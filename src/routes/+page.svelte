@@ -750,6 +750,9 @@
           targetLayerIdx: doc.__conditionalTarget.layerIdx,
           targetNeuronType: doc.__conditionalTarget.neuronType,
         });
+        // Reset architecture selection when entering conditional mode
+        // This clears the table and prevents stale selection on greyed-out layers
+        archComponent.$selection.next({ source: null, target: null });
       } else {
         archComponent.conditionalModeState$.next({
           isConditional: false,
@@ -910,8 +913,6 @@
       console.log('[DATASET] Received passages for query');
       const passages = doc.passages.map((p: any) => p.text);
       if (passageInputComponent) passageInputComponent.updateOptions(passages);
-      if (passageInput2Component)
-        passageInput2Component.updateOptions(passages);
     }
   }
 
