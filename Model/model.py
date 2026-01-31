@@ -25,7 +25,8 @@ from transformers import AutoModelForSequenceClassification, AutoTokenizer
 import torch
 
 # Setup DataStore and Services
-store = DataStore("http://localhost:3030")
+store = DataStore("http://" + os.getenv("MARCELLE_BACKEND_SERVER", "localhost") + ":" + os.getenv("MARCELLE_BACKEND_PORT", "3030"))
+#store = DataStore("http://localhost:3030")
 #store = DataStore("https://marcelle.lisn.upsaclay.fr/nig-viz/api")
 
 ig_service = store.service("predictions")

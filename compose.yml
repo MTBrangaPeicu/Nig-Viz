@@ -1,7 +1,7 @@
 services:
 #  model:
 #    build: ./Model
-#    image: python/nig_viz
+#    image: python/nig-viz
 #    depends_on:
 #      - backend
 
