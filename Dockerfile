@@ -29,4 +29,4 @@ EXPOSE 5173
 # Backend port 3030
 EXPOSE 3030 
 
-ENTRYPOINT ["sh","-c", "npm run $SERVER"]
+ENTRYPOINT ["sh","-c", "pnpm $SERVER"]
