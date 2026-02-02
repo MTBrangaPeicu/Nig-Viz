@@ -9,6 +9,7 @@ services:
       - MARCELLE_BACKEND_PORT=${MARCELLE_BACKEND_PORT}
       - MARCELLE_LOGIN=${MARCELLE_LOGIN}
       - MARCELLE_PWD=${MARCELLE_PWD}
+    restart: always
     deploy:
       resources:
         reservations:
