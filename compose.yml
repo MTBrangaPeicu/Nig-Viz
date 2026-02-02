@@ -15,6 +15,7 @@ services:
       - backend
     environment:
       - SERVER=dev
+      - __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=${__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS}
 
   backend:
     build: .
@@ -26,6 +27,7 @@ services:
       - mongodb
     environment:
       - SERVER=backend
+      - __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=${__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS}
 
   mongodb:
     build: ./docker/mongo
