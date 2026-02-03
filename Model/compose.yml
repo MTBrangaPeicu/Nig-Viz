@@ -12,6 +12,8 @@ services:
     restart: always
     deploy:
       resources:
+        limits:
+          memory: 4096m
         reservations:
           devices:
           - driver: nvidia
