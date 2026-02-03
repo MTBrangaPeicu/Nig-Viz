@@ -17,7 +17,8 @@ ENV \
   TZ="Europe/Paris"
 
 USER appuser
-COPY --chown=appuser ./docker/requirements.txt .
+#COPY --chown=appuser ./docker/requirements.txt .
+COPY --chown=appuser ./requirements.txt .
 
 RUN python -m pip install -r ./requirements.txt
 
