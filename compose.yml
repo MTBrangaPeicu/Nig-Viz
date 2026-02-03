@@ -16,6 +16,10 @@ services:
     environment:
       - SERVER=dev
       - __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=${__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS}
+    deploy:
+      resources:
+        limits:
+          memory: 1024m
 
   backend:
     build: .
@@ -28,6 +32,10 @@ services:
     environment:
       - SERVER=backend
       - __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=${__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS}
+    deploy:
+      resources:
+        limits:
+          memory: 1024m
 
   mongodb:
     build: ./docker/mongo
@@ -40,6 +48,10 @@ services:
       - MONGO_INITDB_DATABASE=nig_viz
       - MARCELLE_LOGIN=${MARCELLE_LOGIN}
       - MARCELLE_PWD=${MARCELLE_PWD}
+    deploy:
+      resources:
+        limits:
+          memory: 1024m
 
 volumes:
   db:
