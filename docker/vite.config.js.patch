@@ -1,0 +1,12 @@
+diff --git a/vite.config.ts b/vite.config.ts
+index ab3d7ec..39df559 100644
+--- a/vite.config.ts
++++ b/vite.config.ts
+@@ -9,4 +9,7 @@ export default defineConfig({
+       'top-level-await': true, //browsers can handle top-level-await features
+     },
+   },
++  server: {
++         host: true
++  }
+ });

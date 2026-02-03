@@ -16,5 +16,3 @@ tqdm==4.66.1
 transformers==4.24.0
 python-socketio[client]==5.9.0
 python-dotenv==1.0.0
-
-

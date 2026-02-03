@@ -1,0 +1,57 @@
+services:
+#  model:
+#    build: ./Model
+#    image: python/nig-viz
+#    depends_on:
+#      - backend
+
+  front:
+    build: .
+    image: node/nig-viz
+    restart: always
+    ports:
+      - "5173:5173"
+    depends_on:
+      - backend
+    environment:
+      - SERVER=dev
+      - __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=${__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS}
+    deploy:
+      resources:
+        limits:
+          memory: 1024m
+
+  backend:
+    build: .
+    image: node/nig-viz
+    restart: always
+    ports:
+      - "3030:3030"
+    depends_on:
+      - mongodb
+    environment:
+      - SERVER=backend
+      - __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=${__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS}
+    deploy:
+      resources:
+        limits:
+          memory: 1024m
+
+  mongodb:
+    build: ./docker/mongo
+    image: mongo/nig_viz 
+    restart: always
+    volumes:
+      - db:/data/db
+      - ./docker/mongo/mongo-entrypoint-initdb.d:/docker-entrypoint-initdb.d:ro
+    environment:
+      - MONGO_INITDB_DATABASE=nig_viz
+      - MARCELLE_LOGIN=${MARCELLE_LOGIN}
+      - MARCELLE_PWD=${MARCELLE_PWD}
+    deploy:
+      resources:
+        limits:
+          memory: 1024m
+
+volumes:
+  db:

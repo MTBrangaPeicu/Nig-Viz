@@ -1,0 +1,22 @@
+services:
+  app:
+    build: .
+    image: python/nig-viz
+    volumes:
+      - /data/nig-viz/datasets:/home/appuser/.ir_datasets
+    environment:
+      - MARCELLE_BACKEND_SERVER=${MARCELLE_BACKEND_SERVER}
+      - MARCELLE_BACKEND_PORT=${MARCELLE_BACKEND_PORT}
+      - MARCELLE_LOGIN=${MARCELLE_LOGIN}
+      - MARCELLE_PWD=${MARCELLE_PWD}
+    restart: always
+    deploy:
+      resources:
+        limits:
+          memory: 4096m
+        reservations:
+          devices:
+          - driver: nvidia
+            #device_ids: ['0', '1']
+            device_ids: ['1'] # RTX 3080 Ti
+            capabilities: [gpu]
