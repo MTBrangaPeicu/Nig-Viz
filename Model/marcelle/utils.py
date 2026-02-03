@@ -1,6 +1,15 @@
 import numpy as np
 
 
+def _replace_nan_with_none(obj):
+    """Recursively replace NaN values with None in nested lists."""
+    if isinstance(obj, list):
+        return [_replace_nan_with_none(item) for item in obj]
+    elif isinstance(obj, float) and np.isnan(obj):
+        return None
+    return obj
+
+
 def normalize_value(v):
     if isinstance(
         v,
@@ -21,13 +30,16 @@ def normalize_value(v):
         return int(v)
 
     elif isinstance(v, (np.float16, np.float32, np.float64)):
+        if np.isnan(v):
+            return None
         return float(v)
 
     elif isinstance(v, (np.complex64, np.complex128)):
         return {"real": v.real, "imag": v.imag}
 
     elif isinstance(v, (np.ndarray,)):
-        return v.tolist()
+        # Convert to list and replace NaN values with None
+        return _replace_nan_with_none(v.tolist())
 
     elif isinstance(v, (np.bool_)):
         return bool(v)

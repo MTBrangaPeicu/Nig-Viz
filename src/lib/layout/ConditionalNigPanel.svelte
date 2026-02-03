@@ -28,7 +28,10 @@
   let selectedLayerIdx = $state<number | null>(null);
   let selectedNeuronIdx = $state<number | null>(null);
   let selectedNeuronType = $state<'attention' | 'ffn' | null>(null);
-  let selectedInputPart = $state<'cls' | 'query' | 'sep_1' | 'document' | 'sep_2' | null>(null);
+  // For attention heads: source = "who is attending", target = "what is being attended to"
+  // For FFN neurons: only target_input_part is used (source doesn't apply)
+  let selectedSourceInputPart = $state<'cls' | 'query' | 'sep_1' | 'document' | 'sep_2' | null>(null);
+  let selectedTargetInputPart = $state<'cls' | 'query' | 'sep_1' | 'document' | 'sep_2' | null>(null);
   
   // Computation state
   let isComputing = $state(false);
@@ -116,7 +119,8 @@
       layerIdx: selectedLayerIdx,
       neuronIdx: selectedNeuronIdx,
       neuronType: selectedNeuronType,
-      targetInputPart: selectedInputPart,
+      sourceInputPart: selectedNeuronType === 'attention' ? selectedSourceInputPart : null,
+      targetInputPart: selectedTargetInputPart,
     });
   }
   
@@ -151,7 +155,8 @@
     selectedLayerIdx = null;
     selectedNeuronIdx = null;
     selectedNeuronType = null;
-    selectedInputPart = null;
+    selectedSourceInputPart = null;
+    selectedTargetInputPart = null;
     computedResult = null;
     errorMessage = null;
     cursorActive = false;
@@ -243,22 +248,68 @@
         {/if}
       </div>
 
-      <!-- Optional Input Part Filter (only show when not in conditional mode) -->
+      <!-- Input Part Filters (only show when not in conditional mode) -->
       {#if !isInConditionalMode}
-        <div class="space-y-2">
-          <label for="input-part-select" class="text-sm">Focus on Input Part (Optional)</label>
-          <select 
-            id="input-part-select"
-            class="select select-bordered select-sm w-full"
-            bind:value={selectedInputPart}
-          >
-            <option value={null}>All Input Parts</option>
-            <option value="cls">[CLS]</option>
-            <option value="query">Query</option>
-            <option value="sep_1">[SEP] (first)</option>
-            <option value="document">Document</option>
-            <option value="sep_2">[SEP] (last)</option>
-          </select>
+        <div class="space-y-3">
+          <!-- Source Input Part (only for attention heads) -->
+          {#if selectedNeuronType === 'attention'}
+            <div class="space-y-1">
+              <label for="source-input-part-select" class="text-sm font-medium">
+                Attending From (Source)
+                <span class="text-xs text-base-content/60 font-normal block">Which tokens are doing the attending</span>
+              </label>
+              <select 
+                id="source-input-part-select"
+                class="select select-bordered select-sm w-full"
+                bind:value={selectedSourceInputPart}
+              >
+                <option value={null}>All Tokens</option>
+                <option value="cls">[CLS]</option>
+                <option value="query">Query</option>
+                <option value="sep_1">[SEP] (first)</option>
+                <option value="document">Document</option>
+                <option value="sep_2">[SEP] (last)</option>
+              </select>
+            </div>
+          {/if}
+
+          <!-- Target Input Part -->
+          <div class="space-y-1">
+            <label for="target-input-part-select" class="text-sm font-medium">
+              {#if selectedNeuronType === 'attention'}
+                Attending To (Target)
+                <span class="text-xs text-base-content/60 font-normal block">Which tokens are being attended to</span>
+              {:else}
+                Focus on Input Part
+                <span class="text-xs text-base-content/60 font-normal block">Which tokens to focus the FFN activation on</span>
+              {/if}
+            </label>
+            <select 
+              id="target-input-part-select"
+              class="select select-bordered select-sm w-full"
+              bind:value={selectedTargetInputPart}
+            >
+              <option value={null}>All Tokens</option>
+              <option value="cls">[CLS]</option>
+              <option value="query">Query</option>
+              <option value="sep_1">[SEP] (first)</option>
+              <option value="document">Document</option>
+              <option value="sep_2">[SEP] (last)</option>
+            </select>
+          </div>
+
+          <!-- Help text for attention pattern selection -->
+          {#if selectedNeuronType === 'attention' && (selectedSourceInputPart || selectedTargetInputPart)}
+            <div class="text-xs text-info bg-info/10 rounded p-2">
+              {#if selectedSourceInputPart && selectedTargetInputPart}
+                Analyzing: <strong>{selectedSourceInputPart}</strong> → <strong>{selectedTargetInputPart}</strong>
+              {:else if selectedSourceInputPart}
+                Analyzing: <strong>{selectedSourceInputPart}</strong> → all tokens
+              {:else if selectedTargetInputPart}
+                Analyzing: all tokens → <strong>{selectedTargetInputPart}</strong>
+              {/if}
+            </div>
+          {/if}
         </div>
 
         <div class="divider my-2"></div>

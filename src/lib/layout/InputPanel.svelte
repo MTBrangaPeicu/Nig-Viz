@@ -133,7 +133,6 @@
     connection.submitNIG({
       query: queryInput.$value.getValue(),
       passage,
-      passage2: passageInput2.$value.getValue(),
       numReps: numRepsInput.$value.getValue(),
       baselineLabel: baseline
     });
@@ -155,10 +154,10 @@
         <div bind:this={passageContainer}></div>
       </div>
 
-      <!-- Passage Input 2 - Marcelle betterText component -->
-      <div class="marcelle-component">
+      <!-- Passage Input 2 - Disabled until backend supports 2 passages -->
+      <!-- <div class="marcelle-component">
         <div bind:this={passage2Container}></div>
-      </div>
+      </div> -->
 
       <!-- Subset Selection - Marcelle subsetButtons component -->
       <div class="marcelle-component">

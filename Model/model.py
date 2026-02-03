@@ -1,6 +1,7 @@
 import numpy as np
 import os
 from dotenv import load_dotenv
+import transformers
 from marcelle import DataStore
 import threading
 import random
@@ -28,6 +29,8 @@ import torch
 store = DataStore("http://" + os.getenv("MARCELLE_BACKEND_SERVER", "localhost") + ":" + os.getenv("MARCELLE_BACKEND_PORT", "3030"))
 #store = DataStore("http://localhost:3030")
 #store = DataStore("https://marcelle.lisn.upsaclay.fr/nig-viz/api")
+
+print(transformers.__version__)
 
 ig_service = store.service("predictions")
 nig_service = store.service("nig-values")
@@ -609,20 +612,29 @@ def handle_conditional_nig_request(doc):
         layer_idx = doc.get("layer_idx", 0)
         neuron_idx = doc.get("neuron_idx", 0)
         neuron_type_str = doc.get("neuron_type", "attention")  # "attention" or "ffn"
-        target_input_part_str = doc.get("target_input_part", None)  # Optional: "cls", "query", "sep_1", "document", "sep_2"
+        source_input_part_str = doc.get("source_input_part", None)  # For attention: which tokens are attending
+        target_input_part_str = doc.get("target_input_part", None)  # For attention: which tokens are being attended to
         
         # Convert string to NeuronType enum
         neuron_type = NeuronType.ATTENTION if neuron_type_str == "attention" else NeuronType.FFN
         
-        # Convert string to InputPart enum if provided
+        # Convert strings to InputPart enum if provided
+        source_input_part = None
         target_input_part = None
+        
+        if source_input_part_str:
+            try:
+                source_input_part = InputPart(source_input_part_str)
+            except ValueError:
+                print(f"Invalid source_input_part: {source_input_part_str}")
+        
         if target_input_part_str:
             try:
                 target_input_part = InputPart(target_input_part_str)
             except ValueError:
                 print(f"Invalid target_input_part: {target_input_part_str}")
         
-        print(f"Conditional NIG request: layer={layer_idx}, neuron={neuron_idx}, type={neuron_type}, input_part={target_input_part}")
+        print(f"Conditional NIG request: layer={layer_idx}, neuron={neuron_idx}, type={neuron_type}, source={source_input_part}, target={target_input_part}")
 
         def progress_callback(current, total):
             progress = current / total
@@ -639,6 +651,7 @@ def handle_conditional_nig_request(doc):
             layer_idx=layer_idx,
             neuron_idx=neuron_idx,
             neuron_type=neuron_type,
+            source_input_part=source_input_part,
             target_input_part=target_input_part,
             progress_callback=progress_callback,
         )
@@ -653,6 +666,7 @@ def handle_conditional_nig_request(doc):
                 "layer_idx": layer_idx,
                 "neuron_idx": neuron_idx,
                 "neuron_type": neuron_type_str,
+                "source_input_part": source_input_part_str,
                 "target_input_part": target_input_part_str,
             }
         }
