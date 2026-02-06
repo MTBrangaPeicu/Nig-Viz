@@ -14,7 +14,12 @@
   // State
   let snapshots = $state<NIGSnapshot[]>([]);
   let selectedIndex = $state<number>(-1);
+  let isNigProcessing = $state(false);
+  let isConditionalProcessing = $state(false);
   let unsubscribe: (() => void) | null = null;
+  
+  // Derived state - disabled if either is processing
+  const isProcessing = $derived(isNigProcessing || isConditionalProcessing);
 
   // Create Marcelle widgets
   const loadButton = widgets.button('Load Selected');
@@ -22,6 +27,8 @@
   
   let loadClickSub: any = null;
   let clearClickSub: any = null;
+  let nigStatusSub: any = null;
+  let conditionalStatusSub: any = null;
 
   onMount(() => {
     // Load initial snapshots
@@ -31,10 +38,25 @@
     unsubscribe = snapshotManager.subscribe(() => {
       snapshots = snapshotManager.getSnapshots();
     });
+    
+    // Track NIG and Conditional NIG processing state to disable load button
+    if (connection) {
+      nigStatusSub = connection.nigStatus$.subscribe((status: any) => {
+        if (status) {
+          isNigProcessing = status.status === 'processing' || status.status === 'pending';
+        }
+      });
+      
+      conditionalStatusSub = connection.conditionalNigStatus$.subscribe((status: any) => {
+        if (status) {
+          isConditionalProcessing = status.status === 'processing' || status.status === 'pending';
+        }
+      });
+    }
 
     // Button click handlers
     loadClickSub = loadButton.$click.subscribe(() => {
-      if (selectedIndex >= 0 && selectedIndex < snapshots.length && connection) {
+      if (selectedIndex >= 0 && selectedIndex < snapshots.length && connection && !isProcessing) {
         const snapshot = snapshots[selectedIndex];
         console.log('[SAVED NIGS] Loading snapshot', snapshot.id);
         connection.loadSnapshot(snapshot);
@@ -53,6 +75,8 @@
     if (unsubscribe) unsubscribe();
     if (loadClickSub) loadClickSub.unsubscribe();
     if (clearClickSub) clearClickSub.unsubscribe();
+    if (nigStatusSub) nigStatusSub.unsubscribe();
+    if (conditionalStatusSub) conditionalStatusSub.unsubscribe();
   });
 
   function selectSnapshot(index: number) {
@@ -110,7 +134,7 @@
 
     <!-- Action Buttons -->
     <div class="flex-shrink-0 p-4 border-t border-base-300 space-y-2">
-      <div class="marcelle-button-styled w-full">
+      <div class="marcelle-button-styled w-full" class:disabled={isProcessing}>
         <div use:loadButton.mount></div>
       </div>
       <div class="marcelle-button-styled w-full">
@@ -168,5 +192,11 @@
     background-color: hsl(var(--bc) / var(--tw-bg-opacity));
     --tw-text-opacity: 1;
     color: hsl(var(--b1) / var(--tw-text-opacity));
+  }
+  
+  /* Disabled state for buttons during processing */
+  :global(.marcelle-button-styled.disabled) {
+    pointer-events: none;
+    opacity: 0.5;
   }
 </style>

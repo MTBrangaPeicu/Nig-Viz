@@ -163,14 +163,18 @@ def neuron_integrated_gradients(
     torch.cuda.empty_cache() 
     return path_gradients, aggregated_error, final_activations           
 
-def nig_predict(query, passage, num_reps, batch_size, baseline_function, progress_callback=None):
+def nig_predict(query, passage, num_reps, batch_size, baseline_function, progress_callback=None, model=None, tokenizer=None):
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = AutoModelForSequenceClassification.from_pretrained("cross-encoder/ms-marco-MiniLM-L12-v2").to(device)
-    model.eval()
+    
+    # Use provided model/tokenizer or create new ones (for standalone use)
+    if model is None:
+        model = AutoModelForSequenceClassification.from_pretrained("cross-encoder/ms-marco-MiniLM-L12-v2").to(device)
+        model.eval()
+    
+    if tokenizer is None:
+        tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
 
     num_labels = model.config.num_labels
-
-    tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
 
     inputs = tokenizer(
         query,

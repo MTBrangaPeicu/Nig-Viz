@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { get, writable } from 'svelte/store';
-  import { goto } from '$app/navigation';
+  import { goto, afterNavigate } from '$app/navigation';
   import { base } from '$app/paths';
   import { Pane, Splitpanes } from 'svelte-splitpanes';
   import { toggle } from '@marcellejs/gui-widgets';
@@ -21,9 +21,6 @@
     logThresholdSlider,
     distributionChart,
     ecdfChart,
-    betterText,
-    betterNumber,
-    subsetButtons,
   } from '$lib/marcelle/components';
   import { nigConnection } from '$lib/services/nig-connection';
   import { snapshotManager } from '$lib/services/nig-snapshots';
@@ -34,6 +31,8 @@
     threshold,
     useAbsoluteValues,
     architectureNodeColors,
+    getSharedInputComponents,
+    sharedBaseline,
   } from '$lib/stores';
   import { store, isAuthenticated } from '$lib/marcelle/store';
 
@@ -67,6 +66,13 @@
   let activeSidebarPanel = $state('input'); // Always holds the selected panel ID
   let sidebarPaneSize = $state(0); // Actual size of the sidebar pane (bound to Pane)
   let outputVisible = $state(false);
+
+  // Open sidebar when returning from query-review dashboard
+  afterNavigate(({ from }) => {
+    if (from?.url?.pathname?.includes('query-review')) {
+      sidebarPaneSize = 20;
+    }
+  });
   let pruningCursorActive = $state(false);
   let conditionalCursorActive = $state(false);
   let conditionalNigPanel: any = $state(null); // Reference to ConditionalNigPanel for setTarget
@@ -133,22 +139,13 @@
   let ecdfComponent: any = $state(null);
   let thresholdSliderComponent: any = $state(null);
 
-  // Input panel components (created immediately, persist across panel switches)
-  let queryInputComponent = betterText('', []);
-  queryInputComponent.title = 'Query';
-  queryInputComponent.samples = [];
-
-  let passageInputComponent = betterText('', []);
-  passageInputComponent.title = 'Passage (required)';
-
-  let passageInput2Component = betterText('', []);
-  passageInput2Component.title = 'Passage 2 (optional)';
-
-  let numRepsInputComponent = betterNumber(20);
-  numRepsInputComponent.title = 'Number of Repetitions';
-
-  let subsetButtonsComponent = subsetButtons(['Random']);
-  subsetButtonsComponent.title = 'Qrels Subsets';
+  // Input panel components (shared across pages for state persistence)
+  const sharedInputs = getSharedInputComponents();
+  let queryInputComponent = sharedInputs.queryInput;
+  let passageInputComponent = sharedInputs.passageInput;
+  let passageInput2Component = sharedInputs.passageInput2;
+  let numRepsInputComponent = sharedInputs.numRepsInput;
+  let subsetButtonsComponent = sharedInputs.subsetButtons;
 
   // Settings toggle components (created immediately, persist across panel switches)
   let absoluteValuesToggle = toggle(true);
@@ -710,8 +707,8 @@
       tableSelectionSub.unsubscribe();
       thresholdSub.unsubscribe();
       globalCutoffSub.unsubscribe();
-      useAbsSub.unsubscribe();
-      archColorsSub.unsubscribe();
+      useAbsSub(); // Svelte store returns unsubscriber function
+      archColorsSub(); // Svelte store returns unsubscriber function
     };
   });
 
@@ -994,6 +991,12 @@
   <title>NIG Visualization</title>
 </svelte:head>
 
+{#if !authChecked}
+  <!-- Loading state while checking authentication -->
+  <div class="fixed inset-0 bg-base-200 flex items-center justify-center">
+    <span class="loading loading-spinner loading-lg"></span>
+  </div>
+{:else}
 <!-- Full-screen layout with Icon Bar | Sidebar | Main Content -->
 <div class="fixed inset-0 bg-base-200 flex flex-col">
   <!-- Top Bar -->
@@ -1179,6 +1182,8 @@
                     <OutputConsole
                       statusStream={nigConnection.nigStatus$}
                       conditionalStatusStream={nigConnection.conditionalNigStatus$}
+                      forwardPassStatusStream={nigConnection.forwardPassStatus$}
+                      prunedForwardPassStatusStream={nigConnection.prunedForwardPassStatus$}
                       connection={nigConnection}
                       pruningState$={archComponent?.pruningState$}
                     />
@@ -1192,6 +1197,7 @@
     </Splitpanes>
   </div>
 </div>
+{/if}
 
 <style>
   @reference "../app.css";

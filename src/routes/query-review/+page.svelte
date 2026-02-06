@@ -1,18 +1,18 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import {
-    betterText,
-    betterNumber,
-    subsetButtons,
-  } from '$lib/marcelle/components';
+  import { goto } from '$app/navigation';
+  import { base } from '$app/paths';
+  import { get } from 'svelte/store';
+  import { getSharedInputComponents, sharedBaseline } from '$lib/stores';
   import { nigConnection } from '$lib/services/nig-connection';
 
-  // Marcelle components
-  let queryInput: any;
-  let passageInput: any;
-  let passageInput2: any;
-  let numRepsInput: any;
-  let subsetButtonsComponent: any;
+  // Get shared Marcelle components (same instances as main page)
+  const sharedInputs = getSharedInputComponents();
+  let queryInput = sharedInputs.queryInput;
+  let passageInput = sharedInputs.passageInput;
+  let passageInput2 = sharedInputs.passageInput2;
+  let numRepsInput = sharedInputs.numRepsInput;
+  let subsetButtonsComponent = sharedInputs.subsetButtons;
 
   // DOM containers
   let queryContainer: HTMLDivElement = $state()!;
@@ -28,7 +28,8 @@
   let numRepsUnmount: (() => void) | null = null;
   let subsetUnmount: (() => void) | null = null;
 
-  let baseline = $state('Padded Query and Passage (Special Tokens Preserved)');
+  // Baseline synced with shared store
+  let baseline = $state(get(sharedBaseline));
 
   const baselineOptions = [
     'Only Padded Tokens',
@@ -38,6 +39,11 @@
 
   let igOutput = $state('');
   let isProcessing = $state(false);
+
+  // Sync baseline changes to store
+  $effect(() => {
+    sharedBaseline.set(baseline);
+  });
 
   // Color function for attribution visualization (from Nig-Viz index.js lines 421-432)
   function getColor(attr: number): string {
@@ -54,32 +60,38 @@
     return `rgb(${r},${g},${b})`;
   }
 
-  onMount(() => {
-    // Create Marcelle components
-    queryInput = betterText('', []);
-    queryInput.title = 'Query';
-    queryInput.samples = [];
+  // Mount shared components using $effect for proper reactivity
+  $effect(() => {
+    if (queryContainer && queryInput && !queryUnmount) {
+      queryUnmount = queryInput.mount(queryContainer);
+    }
+  });
 
-    passageInput = betterText('', []);
-    passageInput.title = 'Passage (required)';
+  $effect(() => {
+    if (passageContainer && passageInput && !passageUnmount) {
+      passageUnmount = passageInput.mount(passageContainer);
+    }
+  });
 
-    passageInput2 = betterText('', []);
-    passageInput2.title = 'Passage 2 (optional)';
+  // Passage 2 is hidden - not mounted
 
-    numRepsInput = betterNumber(20);
-    numRepsInput.title = 'Number of Repetitions';
+  $effect(() => {
+    if (numRepsContainer && numRepsInput && !numRepsUnmount) {
+      numRepsUnmount = numRepsInput.mount(numRepsContainer);
+    }
+  });
 
-    subsetButtonsComponent = subsetButtons(['Random']);
-    subsetButtonsComponent.title = 'Qrels Subsets';
-
-    // Mount components
-    if (queryContainer) queryUnmount = queryInput.mount(queryContainer);
-    if (passageContainer) passageUnmount = passageInput.mount(passageContainer);
-    if (passage2Container)
-      passage2Unmount = passageInput2.mount(passage2Container);
-    if (numRepsContainer) numRepsUnmount = numRepsInput.mount(numRepsContainer);
-    if (subsetContainer)
+  $effect(() => {
+    if (subsetContainer && subsetButtonsComponent && !subsetUnmount) {
       subsetUnmount = subsetButtonsComponent.mount(subsetContainer);
+    }
+  });
+
+  onMount(() => {
+    // Initialize baseline from shared store
+    const unsubBaseline = sharedBaseline.subscribe((val) => {
+      if (val) baseline = val;
+    });
 
     // Subscribe to dataset service updates
     const datasetSub = nigConnection.datasetService.on(
@@ -97,20 +109,26 @@
               queryInput.$value && queryInput.$value.getValue
                 ? queryInput.$value.getValue()
                 : '';
-            const chosen =
-              current && queries.includes(current) ? current : queries[0] || '';
-            if (chosen) {
-              queryInput.$value.next(chosen);
-              const selectedSample = doc.samples.find(
-                (s: any) => s.query === chosen,
-              );
-              if (selectedSample) {
-                const passages = selectedSample.passages.map(
-                  (p: any) => p.text,
-                );
-                passageInput.updateOptions(passages);
-                passageInput2.updateOptions(passages);
+            
+            // Only set a value if current is empty
+            if (!current || !current.trim()) {
+              const chosen = queries[0] || '';
+              if (chosen) {
+                queryInput.$value.next(chosen);
               }
+            }
+            
+            // Update passages for the current query (whether user-typed or from list)
+            const queryToUse = current && current.trim() ? current : queryInput.$value.getValue();
+            const selectedSample = doc.samples.find(
+              (s: any) => s.query === queryToUse,
+            );
+            if (selectedSample) {
+              const passages = selectedSample.passages.map(
+                (p: any) => p.text,
+              );
+              passageInput.updateOptions(passages);
+              passageInput2.updateOptions(passages);
             }
           } catch {}
         }
@@ -158,8 +176,9 @@
         passageInput.updateOptions(passages);
         passageInput2.updateOptions(passages);
 
-        // Auto-select first passage
-        if (passages.length > 0) {
+        // Only auto-select passage if current passage is empty
+        const currentPassage = passageInput.$value.getValue();
+        if (passages.length > 0 && (!currentPassage || !currentPassage.trim())) {
           passageInput.$value.next(passages[0]);
         }
       }
@@ -188,10 +207,13 @@
       }
     });
 
-    // Initial dataset request
-    nigConnection.requestSamples({ n: 10, subset: 'Random' });
+    // Only request samples if shared components don't have data yet
+    if (!queryInput.samples || queryInput.samples.length === 0) {
+      nigConnection.requestSamples({ n: 10, subset: 'Random' });
+    }
 
     return () => {
+      unsubBaseline();
       querySub.unsubscribe();
       subsetSub.unsubscribe();
       igDataSub.unsubscribe();
@@ -200,9 +222,9 @@
   });
 
   onDestroy(() => {
+    // Unmount components from DOM (their state is preserved in the singleton BehaviorSubjects)
     if (queryUnmount) queryUnmount();
     if (passageUnmount) passageUnmount();
-    if (passage2Unmount) passage2Unmount();
     if (numRepsUnmount) numRepsUnmount();
     if (subsetUnmount) subsetUnmount();
   });
@@ -218,7 +240,8 @@
   }
 
   function goBack() {
-    window.location.href = '/';
+    // Use SvelteKit navigation to preserve app state
+    goto(`${base}/`);
   }
 </script>
 
@@ -253,10 +276,10 @@
           <div bind:this={passageContainer}></div>
         </div>
 
-        <!-- Passage Input 2 -->
-        <div class="marcelle-component">
+        <!-- Passage Input 2 - Disabled until backend supports 2 passages -->
+        <!-- <div class="marcelle-component">
           <div bind:this={passage2Container}></div>
-        </div>
+        </div> -->
 
         <!-- Subset Selection -->
         <div class="marcelle-component">

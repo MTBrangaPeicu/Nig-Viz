@@ -12,8 +12,8 @@
 
   function logout() {
     store.logout().then(() => {
-      // Redirect to login page after logout
-      goto(`${base}/login`);
+      // Use full page reload to ensure clean state when logging out
+      window.location.href = `${base}/login`;
     });
   }
 </script>

@@ -5,7 +5,7 @@
   export let id = 'better-number-default'; // Unique id passed from component
 </script>
 
-<div class="form-control">
+<div class="form-control w-full flex flex-col">
   {#if title}
     <label class="label" for="{id}-input">
       <span class="label-text font-semibold">{title}</span>

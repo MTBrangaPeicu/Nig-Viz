@@ -24,14 +24,13 @@
   // Subscribe to the reactive value stream
   if (value$) {
     unsubscribeValue = value$.subscribe((newValue) => {
-      value = newValue || ''; 
-      //autoResizeTextarea(); 
+      value = newValue || '';
     });
   }
 
   onDestroy(() => {
-    if (unsubscribeOptions) unsubscribeOptions();
-    if (unsubscribeValue) unsubscribeValue();
+    if (unsubscribeOptions) unsubscribeOptions.unsubscribe();
+    if (unsubscribeValue) unsubscribeValue.unsubscribe();
     if (suggestionsBox && suggestionsBox.parentNode) {
       document.body.removeChild(suggestionsBox); // Remove suggestions box from the DOM
     }
@@ -42,13 +41,22 @@
       value$.next(event.target.value); // Update the reactive value stream
     }
     showSuggestions(event.target.value);
+    autoResizeTextarea(); // Resize as user types
   }
 
   function autoResizeTextarea() {
-    if (textarea) {
-      textarea.style.height = 'auto'; // Reset height to auto
-      textarea.value = value; // Set the textarea value explicitly
-      textarea.style.height = `${textarea.scrollHeight}px`; // Adjust height to fit content
+    if (!textarea) return;
+    
+    // Don't resize if container is collapsed (width too small to measure properly)
+    const containerWidth = textarea.offsetWidth;
+    if (containerWidth < 100) return;
+    
+    if (value && value.trim()) {
+      textarea.style.height = 'auto';
+      const newHeight = textarea.scrollHeight;
+      textarea.style.height = `${Math.max(80, newHeight)}px`;
+    } else {
+      textarea.style.height = ''; // Clear any inline style for empty textarea
     }
   }
 
@@ -125,8 +133,9 @@
   function selectSuggestion(index) {
     if (index > -1) {
       value = suggestionsBox.children[index].textContent;
+      textarea.value = value; // Sync textarea directly for immediate measurement
       updateValue({ target: { value } });
-      autoResizeTextarea(); // Trigger auto-resize when a value is selected
+      autoResizeTextarea();
       closeSuggestions();
     }
   }
@@ -147,6 +156,9 @@
     suggestionsBox.style.display = 'none';
     document.body.appendChild(suggestionsBox);
 
+    // Auto-resize on mount if there's content and panel is visible
+    autoResizeTextarea();
+
     const onClickOutside = (event) => {
       if (event.target !== textarea && !suggestionsBox.contains(event.target)) {
         closeSuggestions();
@@ -161,7 +173,7 @@
   });
 </script>
 
-<div class="form-control w-full">
+<div class="form-control w-full flex flex-col">
   {#if title}
     <label class="label" for="{id}-input">
       <span class="label-text font-semibold">{title}</span>
@@ -175,7 +187,7 @@
     onfocus={() => showSuggestions(value)}
     onkeydown={handleKeyDown}
     placeholder="Type or pick..."
-    class="textarea textarea-bordered h-20 text-sm"
+    class="textarea textarea-bordered w-full h-20 text-sm"
   ></textarea>
 </div>
 

@@ -1,6 +1,10 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
+  import { goto } from '$app/navigation';
+  import { base } from '$app/paths';
+  import { get } from 'svelte/store';
   import type { NIGConnection } from '$lib/services/nig-connection';
+  import { sharedBaseline } from '$lib/stores';
   
   interface Props {
     visible?: boolean;
@@ -10,7 +14,6 @@
     passageInput2?: any;
     numRepsInput?: any;
     subsetButtons?: any;
-    baseline?: string;
   }
 
   let { 
@@ -21,8 +24,23 @@
     passageInput2,
     numRepsInput,
     subsetButtons: subsetButtonsComponent,
-    baseline = $bindable('Padded Query and Passage (Special Tokens Preserved)')
   }: Props = $props();
+
+  // Baseline synced with shared store
+  let baseline = $state(get(sharedBaseline));
+  
+  // Sync baseline changes to store
+  $effect(() => {
+    sharedBaseline.set(baseline);
+  });
+  
+  // Initialize from store on mount
+  onMount(() => {
+    const unsub = sharedBaseline.subscribe(val => {
+      if (val !== baseline) baseline = val;
+    });
+    return unsub;
+  });
   
   // DOM containers
   let queryContainer: HTMLDivElement = $state()!;
@@ -46,6 +64,7 @@
   
   let statusMessage = $state('Ready');
   let isProcessing = $state(false);
+  let isConditionalProcessing = $state(false);
 
   // Use $effect to reactively mount components when they become available
   $effect(() => {
@@ -106,17 +125,25 @@
     const statusSub = connection.nigStatus$.subscribe((status: any) => {
       if (status) {
         statusMessage = status.message || status.status || 'Ready';
-        isProcessing = status.status === 'processing';
+        isProcessing = status.status === 'processing' || status.status === 'pending';
+      }
+    });
+    
+    // Subscribe to Conditional NIG status
+    const conditionalStatusSub = connection.conditionalNigStatus$.subscribe((status: any) => {
+      if (status) {
+        isConditionalProcessing = status.status === 'processing' || status.status === 'pending';
       }
     });
 
     return () => {
       statusSub.unsubscribe();
+      conditionalStatusSub.unsubscribe();
     };
   });
 
   onDestroy(() => {
-    // Components are owned by parent, just unmount them from DOM
+    // Unmount components from DOM (their state is preserved in the singleton BehaviorSubjects)
     if (queryUnmount) queryUnmount();
     if (passageUnmount) passageUnmount();
     if (passage2Unmount) passage2Unmount();
@@ -170,13 +197,13 @@
       </div>
 
       <!-- Baseline Selection -->
-      <div class="form-control">
+      <div class="form-control w-full flex flex-col">
         <label class="label" for="baseline-select">
           <span class="label-text font-semibold">Baseline</span>
         </label>
         <select 
           id="baseline-select"
-          class="select select-bordered select-sm text-sm"
+          class="select select-bordered select-sm text-sm w-full"
           bind:value={baseline}
         >
           {#each baselineOptions as option}
@@ -191,7 +218,8 @@
       <div class="space-y-2">
         <button 
           class="btn btn-primary btn-block btn-sm"
-          class:btn-disabled={isProcessing}
+          class:btn-disabled={isProcessing || isConditionalProcessing}
+          disabled={isProcessing || isConditionalProcessing}
           onclick={handleCalculateNIG}
         >
           {isProcessing ? 'Calculating...' : 'Calculate NIGs'}
@@ -199,7 +227,8 @@
         
         <button 
           class="btn btn-outline btn-block btn-sm"
-          onclick={() => window.location.href = '/query-review'}
+          disabled={isProcessing || isConditionalProcessing}
+          onclick={() => goto(`${base}/query-review`)}
         >
           Query Review Dashboard
         </button>

@@ -62,8 +62,16 @@ export class NIGConnection {
   // Auto-save NIG snapshots (from index.js lines 618-628)
   private setupSnapshotAutoSave() {
     this.nigModelInstance.$data.subscribe(async (doc: any) => {
-      // Only snapshot fresh computations, not injected snapshots or conditional NIG results
-      if (doc && doc.result && doc.result.subset_b && !doc.__fromSnapshot && !doc.__isConditional) {
+      // Only snapshot fresh computations, not injected snapshots, conditional NIG results, or restored data
+      if (doc && doc.result && doc.result.subset_b && !doc.__fromSnapshot && !doc.__isConditional && !doc.__restored) {
+        // Exit conditional mode when new NIG computation completes
+        if (this.isConditionalMode) {
+          console.log('[NIG CONNECTION] New NIG computed - exiting conditional mode');
+          this.isConditionalMode = false;
+          this.conditionalTarget = null;
+          this.originalNigData = null;
+        }
+        
         const snapshot = snapshotManager.createSnapshot(doc, this.lastNIGRequestInputs || {});
         if (snapshot) {
           await snapshotManager.saveSnapshot(snapshot);
@@ -81,6 +89,14 @@ export class NIGConnection {
     }
 
     console.log('[NIG CONNECTION] Loading snapshot id=', snapshot.id);
+    
+    // Exit conditional mode when loading a snapshot
+    if (this.isConditionalMode) {
+      console.log('[NIG CONNECTION] Loading snapshot - exiting conditional mode');
+      this.isConditionalMode = false;
+      this.conditionalTarget = null;
+      this.originalNigData = null;
+    }
 
     // Restore input values (from Nig-Viz lines 236-269)
     this.lastNIGRequestInputs = {
@@ -180,8 +196,16 @@ export class NIGConnection {
     return this.forwardPassModelInstance.$data;
   }
 
+  get forwardPassStatus$() {
+    return this.forwardPassModelInstance.$status;
+  }
+
   get prunedForwardPassData$() {
     return this.prunedForwardPassModelInstance.$data;
+  }
+
+  get prunedForwardPassStatus$() {
+    return this.prunedForwardPassModelInstance.$status;
   }
 
   // Helper to get baseline type (from index.js lines 433-437)
@@ -247,6 +271,7 @@ export class NIGConnection {
   submitPrunedForwardPass(params: {
     query: string;
     passage: string;
+    nigId: string;  // ID of the NIG result to use for pruning masks
     attentionThreshold: number;
     ffnThreshold: number;
     pruningEnabled: boolean;
@@ -257,6 +282,7 @@ export class NIGConnection {
     this.prunedForwardPassModelInstance.predict({
       query: params.query,
       passage: params.passage,
+      nig_id: params.nigId,  // Pass NIG ID to backend
       pruning_percentage_attention: params.attentionThreshold,
       pruning_percentage_ffn: params.ffnThreshold,
       pruning_enabled: params.pruningEnabled,
@@ -355,6 +381,7 @@ export class NIGConnection {
     this.nigModelInstance.$data.next({
       _id: `restored-${Date.now()}`,
       __isConditional: false,
+      __restored: true,  // Flag to prevent auto-save to database
       result: this.originalNigData
     });
     

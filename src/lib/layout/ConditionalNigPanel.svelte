@@ -35,6 +35,7 @@
   
   // Computation state
   let isComputing = $state(false);
+  let isNigProcessing = $state(false);
   let progress = $state(0);
   let computedResult = $state<any>(null);
   let errorMessage = $state<string | null>(null);
@@ -45,10 +46,92 @@
   // Subscription cleanup
   let subscriptions: any[] = [];
   
+  // Full reset of panel to fresh state (exported for external calls)
+  export function resetPanel() {
+    console.log('[CONDITIONAL NIG] Resetting panel to fresh state');
+    isInConditionalMode = false;
+    computedResult = null;
+    selectedLayerIdx = null;
+    selectedNeuronIdx = null;
+    selectedNeuronType = null;
+    selectedSourceInputPart = null;
+    selectedTargetInputPart = null;
+    cursorActive = false;
+    errorMessage = null;
+    progress = 0;
+    // Also clear service's target selection
+    nigConnection.conditionalTarget = null;
+  }
+  
+  // Save current target selection to service (for persistence across panel switches)
+  function saveTargetToService() {
+    if (selectedLayerIdx !== null && selectedNeuronIdx !== null && selectedNeuronType !== null) {
+      nigConnection.conditionalTarget = {
+        layerIdx: selectedLayerIdx,
+        neuronIdx: selectedNeuronIdx,
+        neuronType: selectedNeuronType,
+        sourceInputPart: selectedSourceInputPart,
+        targetInputPart: selectedTargetInputPart
+      };
+    } else {
+      nigConnection.conditionalTarget = null;
+    }
+  }
+  
+  // Restore target selection from service
+  function restoreTargetFromService() {
+    const target = nigConnection.conditionalTarget;
+    if (target) {
+      selectedLayerIdx = target.layerIdx;
+      selectedNeuronIdx = target.neuronIdx;
+      selectedNeuronType = target.neuronType;
+      selectedSourceInputPart = target.sourceInputPart ?? null;
+      selectedTargetInputPart = target.targetInputPart ?? null;
+      console.log('[CONDITIONAL NIG] Restored target from service:', target);
+    }
+  }
+  
   onMount(() => {
+    // Restore target selection from service if available
+    restoreTargetFromService();
+    
+    // Subscribe to regular NIG status to disable compute button
+    const nigStatusSub = nigConnection.nigStatus$.subscribe((status: any) => {
+      if (status) {
+        isNigProcessing = status.status === 'processing' || status.status === 'pending';
+      }
+    });
+    subscriptions.push(nigStatusSub);
+    
+    // Subscribe to main NIG data stream to reset UI when new NIG/snapshot arrives
+    // Skip first emission (existing data) to avoid resetting on panel switch
+    let isFirstEmission = true;
+    const mainNigDataSub = nigConnection.nigModelInstance.$data.subscribe((doc: any) => {
+      if (isFirstEmission) {
+        isFirstEmission = false;
+        return;
+      }
+      // Reset panel when non-conditional data arrives (new computation, snapshot load)
+      // Skip restored data (handled by Restore Original button) and conditional data
+      if (doc && doc.result && !doc.__isConditional && !doc.__restored) {
+        resetPanel();
+      }
+    });
+    subscriptions.push(mainNigDataSub);
+    
     // Subscribe to conditional NIG results
     const dataSub = nigConnection.conditionalNigData$.subscribe((doc: any) => {
       if (doc && doc.result) {
+        // Only process if:
+        // 1. We're actively computing (fresh result from our computation), OR
+        // 2. We're in conditional mode (service says so - e.g., restoring state)
+        // This prevents re-applying old cached conditional results when panel is recreated
+        // after the user has computed new NIG or loaded a snapshot
+        if (!isComputing && !nigConnection.isConditionalMode) {
+          console.log('[CONDITIONAL NIG] Ignoring stale conditional data - not computing and not in conditional mode');
+          return;
+        }
+        
         computedResult = doc.result;
         isComputing = false;
         progress = 1;
@@ -77,6 +160,8 @@
   });
   
   onDestroy(() => {
+    // Save current target selection before panel is destroyed (for panel switch persistence)
+    saveTargetToService();
     subscriptions.forEach(sub => sub?.unsubscribe?.());
   });
   
@@ -87,6 +172,8 @@
     selectedNeuronType = neuronType;
     computedResult = null;
     errorMessage = null;
+    // Persist to service for panel switch persistence
+    saveTargetToService();
     console.log('[CONDITIONAL NIG] Target set:', { layerIdx, neuronIdx, neuronType });
   }
   
@@ -335,7 +422,7 @@
         <!-- Compute Button -->
         <button 
           class="btn btn-primary btn-block"
-          disabled={!hasValidTarget || isComputing || !hasNigData}
+          disabled={!hasValidTarget || isComputing || !hasNigData || isNigProcessing}
           onclick={computeConditionalNig}
         >
           {#if isComputing}
@@ -349,6 +436,10 @@
         {#if !hasNigData}
           <p class="text-xs text-warning text-center">
             Run standard NIG first
+          </p>
+        {:else if isNigProcessing}
+          <p class="text-xs text-warning text-center">
+            Wait for NIG computation to finish
           </p>
         {/if}
       {/if}

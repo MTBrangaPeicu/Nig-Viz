@@ -94,7 +94,8 @@ def get_masks(nig_model, pruning_percentage_attention: float, pruning_percentage
         if is_attention:
             # For attention: create binary mask where 0 means PRUNE (top values) 
             # The pruned_forward.py multiplies with this mask, so 0 = prune, 1 = keep
-            prune_mask = (tensor >= attention_threshold_value).int()
+            # Use strict > to prune exactly the top X% of values
+            prune_mask = (tensor > attention_threshold_value).int()
             keep_mask = 1 - prune_mask  # Invert: 0 to prune top neurons, 1 to keep others
             
             # Apply pruning rules, targets, and edges for attention
@@ -105,7 +106,8 @@ def get_masks(nig_model, pruning_percentage_attention: float, pruning_percentage
             top_neurons_per_layer_model[key]["all"] = keep_mask
         else:
             # For FFN: get indices of neurons to prune (top values)
-            prune_positions = (tensor >= ffn_threshold_value).nonzero().squeeze()
+            # Use strict > to prune exactly the top X% of values
+            prune_positions = (tensor > ffn_threshold_value).nonzero().squeeze()
             if len(prune_positions.shape) == 0:
                 prune_positions = prune_positions.unsqueeze(0)
             elif len(prune_positions.shape) > 1:
@@ -131,6 +133,211 @@ def get_masks(nig_model, pruning_percentage_attention: float, pruning_percentage
             top_neurons_per_layer_model[key]["all"] = prune_positions
 
     return top_neurons_per_layer_model
+
+
+def get_masks_from_aggregated(subset_b, seq_len, sep_position, 
+                               pruning_percentage_attention=0.0, pruning_percentage_ffn=0.0,
+                               pruning_rules=None, pruning_targets=None, pruning_edges=None):
+    """
+    Get pruning masks from aggregated NIG data (subset_b) retrieved from MongoDB.
+    
+    Args:
+        subset_b: Dict of aggregated NIG values per layer
+                  - Attention: [num_heads, 5, 5] where 5 = [cls, qry, sep1, doc, sep2]
+                  - FFN: [5, hidden_size]
+        seq_len: Actual sequence length from tokenizer
+        sep_position: Position of first [SEP] token
+        pruning_percentage_attention: Percentage of top attention values to prune
+        pruning_percentage_ffn: Percentage of top FFN neurons to prune
+        pruning_rules: List of rules like [{"layer": "L2_ATTN", "tokenType": "all"}]
+        pruning_targets: List of specific targets
+        pruning_edges: List of edges
+    """
+    if pruning_rules is None:
+        pruning_rules = []
+    if pruning_targets is None:
+        pruning_targets = []
+    if pruning_edges is None:
+        pruning_edges = []
+    
+    # Token type indices: 0=cls, 1=qry, 2=sep1, 3=doc, 4=sep2
+    TOKEN_TYPE_MAP = {'cls': 0, 'qry': 1, 'sep1': 2, 'doc': 3, 'sep2': 4}
+    
+    # Collect all values for threshold calculation
+    attention_values = []
+    ffn_values = []
+    
+    for key, agg_tensor in subset_b.items():
+        if not isinstance(agg_tensor, torch.Tensor):
+            agg_tensor = torch.tensor(agg_tensor)
+        if "attention_probs" in key:
+            attention_values.append(agg_tensor.flatten())
+        else:
+            ffn_values.append(agg_tensor.flatten())
+    
+    # Calculate thresholds
+    if attention_values and pruning_percentage_attention > 0:
+        attention_all = torch.cat(attention_values)
+        attention_sorted = torch.sort(attention_all, descending=True).values
+        threshold_idx = int(pruning_percentage_attention * len(attention_sorted))
+        attention_threshold = attention_sorted[min(threshold_idx, len(attention_sorted)-1)]
+    else:
+        attention_threshold = float('inf')
+    
+    if ffn_values and pruning_percentage_ffn > 0:
+        ffn_all = torch.cat(ffn_values)
+        ffn_sorted = torch.sort(ffn_all, descending=True).values
+        threshold_idx = int(pruning_percentage_ffn * len(ffn_sorted))
+        ffn_threshold = ffn_sorted[min(threshold_idx, len(ffn_sorted)-1)]
+    else:
+        ffn_threshold = float('inf')
+    
+    # Build masks
+    top_neurons_per_layer = {}
+    
+    for key, agg_tensor in subset_b.items():
+        if not isinstance(agg_tensor, torch.Tensor):
+            agg_tensor = torch.tensor(agg_tensor)
+        
+        # Extract layer number
+        layer_num = None
+        if "encoder.layer." in key:
+            parts = key.split(".")
+            for i, part in enumerate(parts):
+                if part == "layer" and i + 1 < len(parts):
+                    layer_num = int(parts[i + 1])
+                    break
+        
+        if layer_num is None:
+            continue
+        
+        is_attention = "attention_probs" in key
+        layer_key = f"L{layer_num}_{'ATTN' if is_attention else 'FFN'}"
+        top_neurons_per_layer[key] = {}
+        
+        if is_attention:
+            # agg_tensor: [num_heads, 5, 5]
+            num_heads = agg_tensor.shape[0]
+            
+            # Create full mask [num_heads, seq_len, seq_len], default to KEEP (1)
+            full_mask = torch.ones(num_heads, seq_len, seq_len, dtype=torch.int)
+            
+            # Build token index ranges for each type
+            token_ranges = _get_token_ranges(sep_position, seq_len)
+            
+            # Apply threshold-based pruning: prune cells where aggregated value > threshold
+            # Use strict > to prune exactly the top X% of values
+            for src_type_idx, src_range in enumerate(token_ranges):
+                for tgt_type_idx, tgt_range in enumerate(token_ranges):
+                    agg_value = agg_tensor[:, src_type_idx, tgt_type_idx]  # [num_heads]
+                    # For each head, if aggregated value > threshold, prune all tokens in that src->tgt block
+                    for h in range(num_heads):
+                        if agg_value[h] > attention_threshold:
+                            for src_idx in src_range:
+                                for tgt_idx in tgt_range:
+                                    full_mask[h, src_idx, tgt_idx] = 0
+            
+            # Apply pruning rules
+            full_mask = _apply_rules_to_expanded_mask(
+                full_mask, layer_key, pruning_rules, pruning_targets, pruning_edges, 
+                sep_position, seq_len, num_heads
+            )
+            
+            top_neurons_per_layer[key]["all"] = full_mask
+        
+        else:
+            # FFN: agg_tensor is [5, hidden_size]
+            # Sum across token types to get per-neuron importance
+            neuron_importance = torch.sum(agg_tensor, dim=0)  # [hidden_size]
+            
+            # Get neurons to prune (above threshold)
+            # Use strict > to prune exactly the top X% of values
+            prune_positions = (neuron_importance > ffn_threshold).nonzero().flatten()
+            
+            # Apply FFN rules/targets
+            additional = _apply_ffn_rules(
+                layer_key, pruning_rules, pruning_targets, agg_tensor.shape[1]
+            )
+            
+            if len(additional) > 0:
+                all_prune = torch.cat([prune_positions, additional])
+                prune_positions = torch.unique(all_prune)
+            
+            top_neurons_per_layer[key]["all"] = prune_positions
+    
+    return top_neurons_per_layer
+
+
+def _get_token_ranges(sep_position, seq_len):
+    """Return list of index ranges for [cls, qry, sep1, doc, sep2]."""
+    return [
+        range(0, 1),                                    # cls
+        range(1, sep_position),                         # qry
+        range(sep_position, sep_position + 1),          # sep1
+        range(sep_position + 1, seq_len - 1),           # doc
+        range(seq_len - 1, seq_len),                    # sep2
+    ]
+
+
+def _apply_rules_to_expanded_mask(mask, layer_key, rules, targets, edges, sep_position, seq_len, num_heads):
+    """Apply pruning rules/targets/edges to expanded attention mask."""
+    token_ranges = _get_token_ranges(sep_position, seq_len)
+    type_names = ['cls', 'qry', 'sep1', 'doc', 'sep2']
+    
+    # Apply rules (prune whole token type)
+    for rule in rules:
+        if rule.get("layer") == layer_key:
+            token_type = rule.get("tokenType")
+            if token_type == "all":
+                mask[:, :, :] = 0
+            elif token_type in type_names:
+                type_idx = type_names.index(token_type)
+                for src_idx in token_ranges[type_idx]:
+                    mask[:, src_idx, :] = 0
+    
+    # Apply targets (prune specific head + token type)
+    for target in targets:
+        if target.get("layer") == layer_key and target.get("type") == "ATTN":
+            head_idx = int(target.get("index", 0))
+            token_type = target.get("tokenType")
+            if head_idx < num_heads and token_type in type_names:
+                type_idx = type_names.index(token_type)
+                for src_idx in token_ranges[type_idx]:
+                    mask[head_idx, src_idx, :] = 0
+    
+    # Apply edges (prune src->tgt connections)
+    for edge in edges:
+        if edge.get("layer") == layer_key:
+            src_type = edge.get("srcToken")
+            tgt_type = edge.get("tgtToken")
+            if src_type in type_names and tgt_type in type_names:
+                src_idx = type_names.index(src_type)
+                tgt_idx = type_names.index(tgt_type)
+                for s in token_ranges[src_idx]:
+                    for t in token_ranges[tgt_idx]:
+                        mask[:, s, t] = 0
+    
+    return mask
+
+
+def _apply_ffn_rules(layer_key, rules, targets, hidden_size):
+    """Apply FFN rules/targets, return additional neuron indices to prune."""
+    positions = []
+    
+    for rule in rules:
+        if rule.get("layer") == layer_key:
+            if rule.get("tokenType") == "all":
+                positions.append(torch.arange(hidden_size))
+    
+    for target in targets:
+        if target.get("layer") == layer_key and target.get("type") == "FFN":
+            neuron_idx = int(target.get("index", 0))
+            if neuron_idx < hidden_size:
+                positions.append(torch.tensor([neuron_idx]))
+    
+    if positions:
+        return torch.cat(positions)
+    return torch.tensor([], dtype=torch.long)
 
 
 def apply_pruning_rules_attention(keep_mask, tensor, layer_key, pruning_rules, pruning_targets, pruning_edges, sep_position):

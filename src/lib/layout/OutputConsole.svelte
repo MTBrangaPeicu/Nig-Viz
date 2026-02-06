@@ -16,6 +16,8 @@
     connection?: NIGConnection;
     statusStream?: any; // RxJS Observable from nigModelInstance.$status
     conditionalStatusStream?: any; // RxJS Observable from conditionalNigModelInstance.$status
+    forwardPassStatusStream?: any; // RxJS Observable from forwardPassModelInstance.$status
+    prunedForwardPassStatusStream?: any; // RxJS Observable from prunedForwardPassModelInstance.$status
     pruningState$?: BehaviorSubject<PruningState>;
   }
 
@@ -23,6 +25,8 @@
     connection,
     statusStream,
     conditionalStatusStream,
+    forwardPassStatusStream,
+    prunedForwardPassStatusStream,
     pruningState$
   }: Props = $props();
 
@@ -50,6 +54,8 @@
   let forwardClickSub: any = null;
   let prunedClickSub: any = null;
   let conditionalStatusSub: any = null;
+  let forwardPassStatusSub: any = null;
+  let prunedForwardPassStatusSub: any = null;
   
   onMount(() => {
     if (statusStream) {
@@ -57,7 +63,7 @@
         console.log('Status update:', status);
         if (status) {
           statusMessage = status.message || status.status || 'Ready';
-          isProcessing = status.status === 'processing';
+          isProcessing = status.status === 'processing' || status.status === 'pending';
           
           // Calculate progress from backend progress field (0-1) or message pattern
           if (status.status === 'processing') {
@@ -153,7 +159,7 @@
         console.log('[OUTPUT CONSOLE] Conditional status update:', status);
         if (status) {
           statusMessage = status.message || status.status || 'Ready';
-          isProcessing = status.status === 'processing';
+          isProcessing = status.status === 'processing' || status.status === 'pending';
           
           if (status.status === 'processing') {
             if (typeof status.progress === 'number') {
@@ -170,6 +176,44 @@
             }
           } else if (status.status === 'success') {
             progress = 100;
+          }
+        }
+      });
+    }
+
+    // Subscribe to forward pass status
+    if (forwardPassStatusStream) {
+      forwardPassStatusSub = forwardPassStatusStream.subscribe((status: any) => {
+        console.log('[OUTPUT CONSOLE] Forward pass status update:', status);
+        if (status) {
+          statusMessage = status.message || status.status || 'Ready';
+          isProcessing = status.status === 'processing' || status.status === 'pending';
+          
+          if (status.status === 'success') {
+            progress = 100;
+          } else if (status.status === 'processing') {
+            progress = 50; // No progress reporting for forward pass
+          } else {
+            progress = 0;
+          }
+        }
+      });
+    }
+
+    // Subscribe to pruned forward pass status
+    if (prunedForwardPassStatusStream) {
+      prunedForwardPassStatusSub = prunedForwardPassStatusStream.subscribe((status: any) => {
+        console.log('[OUTPUT CONSOLE] Pruned forward pass status update:', status);
+        if (status) {
+          statusMessage = status.message || status.status || 'Ready';
+          isProcessing = status.status === 'processing' || status.status === 'pending';
+          
+          if (status.status === 'success') {
+            progress = 100;
+          } else if (status.status === 'processing') {
+            progress = 50; // No progress reporting for pruned forward pass
+          } else {
+            progress = 0;
           }
         }
       });
@@ -192,6 +236,8 @@
     if (forwardClickSub) forwardClickSub.unsubscribe();
     if (prunedClickSub) prunedClickSub.unsubscribe();
     if (conditionalStatusSub) conditionalStatusSub.unsubscribe();
+    if (forwardPassStatusSub) forwardPassStatusSub.unsubscribe();
+    if (prunedForwardPassStatusSub) prunedForwardPassStatusSub.unsubscribe();
   });
 
   function handleForwardPass() {
@@ -199,6 +245,13 @@
       alert('Please run NIG calculation first');
       return;
     }
+    
+    // Prevent submission if already processing
+    if (isProcessing) {
+      console.log('[OUTPUT CONSOLE] Operation in progress, ignoring click');
+      return;
+    }
+    
     const inputs = connection.lastNIGRequestInputs;
     const passage = inputs.passage + (inputs.passage2 ? (' \n\n' + inputs.passage2) : '');
     connection.submitForwardPass(inputs.query, passage);
@@ -207,6 +260,18 @@
   function handlePrunedForwardPass() {
     if (!connection || !connection.lastNIGRequestInputs) {
       alert('Please run NIG calculation first');
+      return;
+    }
+    
+    // Check if in conditional mode
+    if (connection.isConditionalMode) {
+      alert('Cannot run pruned forward pass in conditional NIG mode. Please exit conditional mode first.');
+      return;
+    }
+    
+    // Prevent submission if already processing
+    if (isProcessing) {
+      console.log('[OUTPUT CONSOLE] Operation in progress, ignoring click');
       return;
     }
     
@@ -233,6 +298,7 @@
     connection.submitPrunedForwardPass({
       query: inputs.query,
       passage,
+      nigId: nigDoc._id,  // Pass NIG ID for database lookup
       attentionThreshold: pruningState.thresholds?.attention || 0,
       ffnThreshold: pruningState.thresholds?.ffn || 0,
       pruningEnabled: pruningState.rules.length > 0 || pruningState.targets.length > 0 || pruningState.edges.length > 0,
@@ -246,7 +312,7 @@
 <div class="h-16 bg-base-100 border-t border-base-300 flex items-center px-4 gap-8 flex-shrink-0">
   <!-- Forward Pass Section -->
   <div class="flex items-center gap-3">
-    <div class="marcelle-button-styled">
+    <div class="marcelle-button-styled" class:disabled={isProcessing || connection?.isConditionalMode}>
       <div use:submitForwardPass.mount></div>
     </div>
     {#if forwardRelevance && forwardConfidence}
@@ -266,7 +332,7 @@
 
   <!-- Pruned Pass Section -->
   <div class="flex items-center gap-3">
-    <div class="marcelle-button-styled">
+    <div class="marcelle-button-styled" class:disabled={isProcessing || connection?.isConditionalMode}>
       <div use:submitPrunedForwardPass.mount></div>
     </div>
     {#if prunedRelevance && prunedConfidence}
@@ -342,5 +408,11 @@
     background-color: hsl(var(--bc) / var(--tw-bg-opacity));
     --tw-text-opacity: 1;
     color: hsl(var(--b1) / var(--tw-text-opacity));
+  }
+  
+  /* Disabled state for buttons during processing */
+  .marcelle-button-styled.disabled {
+    pointer-events: none;
+    opacity: 0.5;
   }
 </style>

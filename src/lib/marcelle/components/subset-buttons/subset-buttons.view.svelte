@@ -34,7 +34,7 @@
   }
 </script>
 
-<div class="form-control">
+<div class="form-control w-full flex flex-col">
   {#if title}
     <span id="{id}-label" class="label">
       <span class="label-text font-semibold">{title}</span>
