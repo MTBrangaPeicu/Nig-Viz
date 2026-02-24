@@ -18,6 +18,7 @@
     conditionalStatusStream?: any; // RxJS Observable from conditionalNigModelInstance.$status
     forwardPassStatusStream?: any; // RxJS Observable from forwardPassModelInstance.$status
     prunedForwardPassStatusStream?: any; // RxJS Observable from prunedForwardPassModelInstance.$status
+    igStatusStream?: any; // RxJS Observable from igModelInstance.$status
     pruningState$?: BehaviorSubject<PruningState>;
   }
 
@@ -27,6 +28,7 @@
     conditionalStatusStream,
     forwardPassStatusStream,
     prunedForwardPassStatusStream,
+    igStatusStream,
     pruningState$
   }: Props = $props();
 
@@ -56,6 +58,7 @@
   let conditionalStatusSub: any = null;
   let forwardPassStatusSub: any = null;
   let prunedForwardPassStatusSub: any = null;
+  let igStatusSub: any = null;
   
   onMount(() => {
     if (statusStream) {
@@ -219,6 +222,29 @@
       });
     }
 
+    // Subscribe to IG (token integrated gradients) status
+    if (igStatusStream) {
+      igStatusSub = igStatusStream.subscribe((status: any) => {
+        console.log('[OUTPUT CONSOLE] IG status update:', status);
+        if (status) {
+          statusMessage = status.message || status.status || 'Ready';
+          isProcessing = status.status === 'processing' || status.status === 'pending';
+          
+          if (status.status === 'success') {
+            progress = 100;
+          } else if (status.status === 'processing') {
+            if (typeof status.progress === 'number') {
+              progress = Math.round(status.progress * 100);
+            } else {
+              progress = 50;
+            }
+          } else {
+            progress = 0;
+          }
+        }
+      });
+    }
+
     // Subscribe to button clicks
     forwardClickSub = submitForwardPass.$click.subscribe(() => {
       handleForwardPass();
@@ -238,6 +264,7 @@
     if (conditionalStatusSub) conditionalStatusSub.unsubscribe();
     if (forwardPassStatusSub) forwardPassStatusSub.unsubscribe();
     if (prunedForwardPassStatusSub) prunedForwardPassStatusSub.unsubscribe();
+    if (igStatusSub) igStatusSub.unsubscribe();
   });
 
   function handleForwardPass() {
@@ -310,8 +337,20 @@
 </script>
 
 <div class="h-16 bg-base-100 border-t border-base-300 flex items-center px-4 gap-8 flex-shrink-0">
-  <!-- Forward Pass Section -->
-  <div class="flex items-center gap-3">
+  <!-- Status indicator (left side) -->
+  <div class="flex items-center gap-2">
+    <div 
+      class="radial-progress text-primary"
+      style="--value:{isProcessing ? progress : 100}; --size:2rem; --thickness:2px;" 
+      role="progressbar"
+    >
+      <span class="text-[10px] font-medium">{isProcessing ? progress + '%' : '✓'}</span>
+    </div>
+    <span class="text-xs text-base-content/70">{statusMessage}</span>
+  </div>
+
+  <!-- Forward Pass Section (right side) -->
+  <div class="ml-auto flex items-center gap-3">
     <div class="marcelle-button-styled" class:disabled={isProcessing || connection?.isConditionalMode}>
       <div use:submitForwardPass.mount></div>
     </div>
@@ -330,7 +369,7 @@
 
   <div class="h-8 w-px bg-base-300"></div>
 
-  <!-- Pruned Pass Section -->
+  <!-- Pruned Pass Section (right side) -->
   <div class="flex items-center gap-3">
     <div class="marcelle-button-styled" class:disabled={isProcessing || connection?.isConditionalMode}>
       <div use:submitPrunedForwardPass.mount></div>
@@ -346,18 +385,6 @@
     {:else}
       <span class="text-xs text-base-content/40">No result yet</span>
     {/if}
-  </div>
-
-  <!-- Status indicator (right side) -->
-  <div class="ml-auto flex items-center gap-2">
-    <span class="text-xs text-base-content/70">{statusMessage}</span>
-    <div 
-      class="radial-progress text-primary"
-      style="--value:{isProcessing ? progress : 100}; --size:2rem; --thickness:2px;" 
-      role="progressbar"
-    >
-      <span class="text-[10px] font-medium">{isProcessing ? progress + '%' : '✓'}</span>
-    </div>
   </div>
 </div>
 

@@ -249,7 +249,10 @@
 				const finiteScores = headScores.filter(h => h.hasData).map(h => h.score);
 				const minScore = finiteScores.length > 0 ? d3.min(finiteScores) : 0;
 				const maxScore = finiteScores.length > 0 ? d3.max(finiteScores) : 1;
-				const greyScale = d3.scaleSequential(d3.interpolateGreys).domain([minScore, maxScore]).clamp(true);
+				// Ensure non-zero range for grey scale (avoid NaN from 0/0)
+				const greyScale = d3.scaleSequential(d3.interpolateGreys)
+					.domain([minScore, minScore === maxScore ? maxScore + 1 : maxScore])
+					.clamp(true);
 				
 				svg.selectAll('circle.row-dot')
 					.attr('fill', function(d) {
@@ -283,7 +286,10 @@
 						if (nigMin < 0 && nigMax > 0) {
 							return getColorScale(val, nigMin, nigMax);
 						}
-						const gry = d3.scaleSequential(d3.interpolateInferno).domain([nigMin, nigMax]).clamp(true);
+						// Ensure non-zero range for scale (avoid NaN from 0/0)
+						const gry = d3.scaleSequential(d3.interpolateInferno)
+							.domain([nigMin, nigMin === nigMax ? nigMax + 1 : nigMax])
+							.clamp(true);
 						return gry(val);
 					});
 			}
@@ -382,6 +388,7 @@
 			return { 
 				index: i, 
 				row: row,
+				nigRow: options.values[i] || [], // Always store NIG values for highlighting
 				score: finiteVals.reduce((a, b) => a + b, 0),
 				hasData: finiteVals.length > 0
 			};
@@ -415,8 +422,9 @@
 	}
 
 	// Heatmap toggles
-	let displayMode = 'values'; // 'values' | 'heatmap'
+	let displayMode = 'heatmap'; // 'values' | 'heatmap'
 	let heatmapMetric = 'nig'; // 'nig' | 'activation'
+	let showValuesOnHeatmap = false; // show values on heatmap squares
 	let attnHeatmapEl;
 	let ffnHeatmapEl;
 	let attnTooltipEl; // created on mount and appended to document.body
@@ -449,10 +457,11 @@
 			: options.values;
 		// Preserve current head ordering (from scoredHeads) but always read row data from attnMatrix
 		const heads = (scoredHeads.length
-			? scoredHeads.map(h => ({ index: h.index, row: (attnMatrix?.[h.index] || []) }))
-			: (attnMatrix || []).map((row, i) => ({ index: i, row }))
+			? scoredHeads.map(h => ({ index: h.index, row: (attnMatrix?.[h.index] || []), nigRow: (options.values?.[h.index] || []) }))
+			: (attnMatrix || []).map((row, i) => ({ index: i, row, nigRow: options.values?.[i] || [] }))
 		);
 		const rows = heads.map(h => h.row);
+		const nigRows = heads.map(h => h.nigRow); // Always NIG values for highlighting
 		const yLabels = heads.map(h => `head#${h.index}`);
 		const xBase = ['cls', 'qry', 'sep1', 'doc', 'sep2'];
 		const xLabels = (options.orientation === 'tgtsToSrcs')
@@ -527,7 +536,7 @@
 		}
 
 		// Dimensions (align with table-like columns)
-		const containerW = attnHeatmapEl.clientWidth || 600;
+		const containerW = 600; // Fixed width instead of adaptive
 		const circleColW = 28; // similar to first table column
 		const headColW = 100; // width for "Head" text column
 		const margin = { top: 28, right: 12, bottom: 20, left: 8 };
@@ -600,25 +609,29 @@
 		const data = [];
 		for (let i = 0; i < yLabels.length; i++) {
 			for (let j = 0; j < xLabels.length; j++) {
-				data.push({ row: yLabels[i], col: xLabels[j], value: rows[i]?.[j] ?? 0 });
+				data.push({ row: yLabels[i], col: xLabels[j], value: rows[i]?.[j] ?? 0, nigValue: nigRows[i]?.[j] ?? 0 });
 			}
 		}
 
 		gGrid.selectAll('rect.cell')
 			.data(data)
 			.join('rect')
-			.attr('class', 'cell')
+			.attr('class', d => {
+				const isHighlighted = isValueUsedInEdges(d.nigValue);
+				return isHighlighted ? 'cell cell-highlighted' : 'cell';
+			})
 			.attr('x', d => x(d.col) ?? 0)
 			.attr('y', d => y(d.row) ?? 0)
 			.attr('rx', 3)
 			.attr('ry', 3)
 			.attr('width', x.bandwidth())
 			.attr('height', y.bandwidth())
-			.style('stroke', 'none')
+			.style('stroke', d => isValueUsedInEdges(d.nigValue) ? '#000000' : 'none')
+			.style('stroke-width', d => isValueUsedInEdges(d.nigValue) ? 2 : 0)
 			.style('opacity', d => Number.isFinite(d.value) ? 0.95 : 0.3)
 			.attr('fill', d => Number.isFinite(d.value) ? color(d.value) : '#888')
 			.on('mouseover', function (event, d) {
-				d3.select(this).style('stroke', '#333').style('stroke-width', 1);
+				d3.select(this).style('stroke', '#22c55e').style('stroke-width', 2);
 				tooltip.style('opacity', 1)
 					.html(`<b>${d.row}</b><br>${d.col}<br>${heatmapMetric === 'activation' ? 'activation' : 'value'}: ${formatValue(Number(d.value))}`);
 			})
@@ -627,13 +640,55 @@
 				const py = Math.min(window.innerHeight - 80, (event.pageY || 0) + 12);
 				tooltip.style('left', `${px}px`).style('top', `${py}px`);
 			})
-			.on('mouseleave', function () {
-				d3.select(this).style('stroke', 'none');
+			.on('mouseleave', function (event, d) {
+				const isHighlighted = isValueUsedInEdges(d.nigValue);
+				d3.select(this)
+					.style('stroke', isHighlighted ? '#000000' : 'none')
+					.style('stroke-width', isHighlighted ? 2 : 0);
 				tooltip.style('opacity', 0);
-			});
+			})
+			.on('click', function (event, d) {
+				// Extract head index from row label (e.g., "head#5" -> 5)
+				const headMatch = d.row.match(/head#(\d+)/);
+				if (headMatch) {
+					const headIndex = parseInt(headMatch[1]);
+					if (conditionalCursorEnabled) {
+						handleConditionalNigTarget(headIndex, 'ATTN');
+					} else if (pruningCursorEnabled) {
+						togglePruningTarget(headIndex, 'ATTN');
+					}
+				}
+			})
+			.style('cursor', () => (pruningCursorEnabled || conditionalCursorEnabled) ? 'pointer' : 'default');
+
+		// Show values on heatmap squares if toggle is enabled
+		if (showValuesOnHeatmap) {
+			gGrid.selectAll('text.cell-value')
+				.data(data)
+				.join('text')
+				.attr('class', 'cell-value')
+				.attr('x', d => (x(d.col) ?? 0) + x.bandwidth() / 2)
+				.attr('y', d => (y(d.row) ?? 0) + y.bandwidth() / 2)
+				.attr('text-anchor', 'middle')
+				.attr('dominant-baseline', 'middle')
+				.style('font-size', '12px')
+				.style('fill', d => {
+					const bgColor = Number.isFinite(d.value) ? color(d.value) : '#888';
+					return getContrastTextColor(bgColor);
+				})
+				.style('pointer-events', 'none')
+				.text(d => Number.isFinite(d.value) ? formatValue(d.value) : '');
+		} else {
+			gGrid.selectAll('text.cell-value').remove();
+		}
 
 		// Left columns: circle and head label (to mirror table's first two columns)
 		// Circles column (always grey scale based on aggregated score)
+		// Create grey scale once (with non-zero range to avoid NaN)
+		const greyScale = d3.scaleSequential(d3.interpolateGreys)
+			.domain([minHeadScore, minHeadScore === maxHeadScore ? maxHeadScore + 1 : maxHeadScore])
+			.clamp(true);
+		
 		gLeft.selectAll('circle.row-dot')
 			.data(heads)
 			.join('circle')
@@ -648,8 +703,6 @@
 				const finiteVals = (h.row || []).filter(v => Number.isFinite(v));
 				if (finiteVals.length === 0) return '#888'; // Grey for rows with all NaN
 				const score = finiteVals.reduce((a, b) => a + b, 0);
-				// Use grey scale (independent of heatmap color scheme)
-				const greyScale = d3.scaleSequential(d3.interpolateGreys).domain([minHeadScore, maxHeadScore]).clamp(true);
 				return greyScale(score);
 			});
 
@@ -661,12 +714,35 @@
 			.attr('x', circleColW + 8)
 			.attr('y', (d) => (y(d) ?? 0) + y.bandwidth() / 2)
 			.attr('dominant-baseline', 'middle')
-			.text(d => d);
+			.text(d => d)
+			.style('cursor', () => (pruningCursorEnabled || conditionalCursorEnabled) ? 'pointer' : 'default')
+			.on('click', function (event, d) {
+				const headMatch = d.match(/head#(\d+)/);
+				if (headMatch) {
+					const headIndex = parseInt(headMatch[1]);
+					if (conditionalCursorEnabled) {
+						handleConditionalNigTarget(headIndex, 'ATTN');
+					} else if (pruningCursorEnabled) {
+						togglePruningTarget(headIndex, 'ATTN');
+					}
+				}
+			});
+
+		// Add click handlers to circles
+		gLeft.selectAll('circle.row-dot')
+			.style('cursor', () => (pruningCursorEnabled || conditionalCursorEnabled) ? 'pointer' : 'default')
+			.on('click', function (event, h) {
+				if (conditionalCursorEnabled) {
+					handleConditionalNigTarget(h.index, 'ATTN');
+				} else if (pruningCursorEnabled) {
+					togglePruningTarget(h.index, 'ATTN');
+				}
+			});
 	}
 
 	// Re-render heatmap on mode/layer/sort changes
 	// Re-render also when attnSort changes (include it as a reactive dependency)
-	$: if (displayMode === 'heatmap' && options?.type === 'ATTN' && attnHeatmapEl && attnSort && heatmapMetric) {
+	$: if (displayMode === 'heatmap' && options?.type === 'ATTN' && attnHeatmapEl && attnSort && heatmapMetric && showValuesOnHeatmap !== undefined) {
 		renderATTNHeatmap();
 	}
 
@@ -750,7 +826,7 @@
 		})();
 
 		// Layout
-		const containerW = ffnHeatmapEl.clientWidth || 600;
+		const containerW = 600; // Fixed width instead of adaptive
 		const circleColW = 28;
 		const neuronColW = 120;
 		const margin = { top: 28, right: 12, bottom: 20, left: 8 };
@@ -833,8 +909,19 @@
 				if (!Number.isFinite(val)) return '#888';
 				// Always use NIG scale for dots, regardless of heatmapMetric
 				if (nigMin < 0 && nigMax > 0) return getColorScale(val, nigMin, nigMax);
-				const gry = d3.scaleSequential(d3.interpolateInferno).domain([nigMin, nigMax]).clamp(true);
+				// Ensure non-zero range for scale (avoid NaN from 0/0)
+				const gry = d3.scaleSequential(d3.interpolateInferno)
+					.domain([nigMin, nigMin === nigMax ? nigMax + 1 : nigMax])
+					.clamp(true);
 				return gry(val);
+			})
+			.style('cursor', () => (pruningCursorEnabled || conditionalCursorEnabled) ? 'pointer' : 'default')
+			.on('click', function (event, i) {
+				if (conditionalCursorEnabled) {
+					handleConditionalNigTarget(i, 'FFN');
+				} else if (pruningCursorEnabled) {
+					togglePruningTarget(i, 'FFN');
+				}
 			});
 		// Neuron labels
 		gLeft.selectAll('text.row-neuron')
@@ -844,24 +931,36 @@
 			.attr('x', circleColW + 8)
 			.attr('y', i => (y(i) ?? 0) + y.bandwidth() / 2)
 			.attr('dominant-baseline', 'middle')
-			.text(i => `neuron#${i}`);
+			.text(i => `neuron#${i}`)
+			.style('cursor', () => (pruningCursorEnabled || conditionalCursorEnabled) ? 'pointer' : 'default')
+			.on('click', function (event, i) {
+				if (conditionalCursorEnabled) {
+					handleConditionalNigTarget(i, 'FFN');
+				} else if (pruningCursorEnabled) {
+					togglePruningTarget(i, 'FFN');
+				}
+			});
 
 		// Heat cells: NIG column
 		gGrid.selectAll('rect.cell-nig')
 			.data(nigData)
 			.join('rect')
-			.attr('class', 'cell cell-nig')
+			.attr('class', d => {
+				const isHighlighted = isValueUsedInEdges(d.val);
+				return isHighlighted ? 'cell cell-nig cell-highlighted' : 'cell cell-nig';
+			})
 			.attr('x', 0)
 			.attr('y', d => y(d.index) ?? 0)
 			.attr('rx', 3)
 			.attr('ry', 3)
 			.attr('width', perColW)
 			.attr('height', y.bandwidth())
-			.style('stroke', 'none')
+			.style('stroke', d => isValueUsedInEdges(d.val) ? '#000000' : 'none')
+			.style('stroke-width', d => isValueUsedInEdges(d.val) ? 2 : 0)
 			.style('opacity', d => Number.isFinite(d.val) ? 0.95 : 0.3)
 			.attr('fill', d => Number.isFinite(d.val) ? nigColor(d.val) : '#888')
 			.on('mouseover', function (event, d) {
-				d3.select(this).style('stroke', '#333').style('stroke-width', 1);
+				d3.select(this).style('stroke', '#22c55e').style('stroke-width', 2);
 				d3.select(attnTooltipEl).style('opacity', 1)
 					.html(`<b>neuron#${d.index}</b><br>NIG: ${formatValue(Number(d.val))}`);
 			})
@@ -870,10 +969,21 @@
 				const py = Math.min(window.innerHeight - 80, (event.pageY || 0) + 12);
 				d3.select(attnTooltipEl).style('left', `${px}px`).style('top', `${py}px`);
 			})
-			.on('mouseleave', function () {
-				d3.select(this).style('stroke', 'none');
+			.on('mouseleave', function (event, d) {
+				const isHighlighted = isValueUsedInEdges(d.val);
+				d3.select(this)
+					.style('stroke', isHighlighted ? '#000000' : 'none')
+					.style('stroke-width', isHighlighted ? 2 : 0);
 				d3.select(attnTooltipEl).style('opacity', 0);
-			});
+			})
+			.on('click', function (event, d) {
+				if (conditionalCursorEnabled) {
+					handleConditionalNigTarget(d.index, 'FFN');
+				} else if (pruningCursorEnabled) {
+					togglePruningTarget(d.index, 'FFN');
+				}
+			})
+			.style('cursor', () => (pruningCursorEnabled || conditionalCursorEnabled) ? 'pointer' : 'default');
 
 		// Heat cells: Activation column (optional)
 		if (hasAct) {
@@ -891,7 +1001,7 @@
 				.style('opacity', d => Number.isFinite(d.val) ? 0.95 : 0.3)
 				.attr('fill', d => Number.isFinite(d.val) ? actColor(d.val) : '#888')
 				.on('mouseover', function (event, d) {
-					d3.select(this).style('stroke', '#333').style('stroke-width', 1);
+					d3.select(this).style('stroke', '#333').style('stroke-width', 2);
 					d3.select(attnTooltipEl).style('opacity', 1)
 						.html(`<b>neuron#${d.index}</b><br>Activation: ${formatValue(Number(d.val))}`);
 				})
@@ -905,10 +1015,52 @@
 					d3.select(attnTooltipEl).style('opacity', 0);
 				});
 		}
+
+		// Show values on heatmap squares if toggle is enabled
+		if (showValuesOnHeatmap) {
+			// NIG column values
+			gGrid.selectAll('text.cell-nig-value')
+				.data(nigData)
+				.join('text')
+				.attr('class', 'cell-nig-value')
+				.attr('x', perColW / 2)
+				.attr('y', d => (y(d.index) ?? 0) + y.bandwidth() / 2)
+				.attr('text-anchor', 'middle')
+				.attr('dominant-baseline', 'middle')
+				.style('font-size', '12px')
+				.style('fill', d => {
+					const bgColor = Number.isFinite(d.val) ? nigColor(d.val) : '#888';
+					return getContrastTextColor(bgColor);
+				})
+				.style('pointer-events', 'none')
+				.text(d => Number.isFinite(d.val) ? formatValue(d.val) : '');
+
+			// Activation column values
+			if (hasAct) {
+				gGrid.selectAll('text.cell-act-value')
+					.data(actData)
+					.join('text')
+					.attr('class', 'cell-act-value')
+					.attr('x', perColW + colGap + perColW / 2)
+					.attr('y', d => (y(d.index) ?? 0) + y.bandwidth() / 2)
+					.attr('text-anchor', 'middle')
+					.attr('dominant-baseline', 'middle')
+					.style('font-size', '12px')
+					.style('fill', d => {
+						const bgColor = Number.isFinite(d.val) ? actColor(d.val) : '#888';
+						return getContrastTextColor(bgColor);
+					})
+					.style('pointer-events', 'none')
+					.text(d => Number.isFinite(d.val) ? formatValue(d.val) : '');
+			}
+		} else {
+			gGrid.selectAll('text.cell-nig-value').remove();
+			gGrid.selectAll('text.cell-act-value').remove();
+		}
 	}
 
 	// Re-render also when ffnSort changes (include it as a reactive dependency)
-	$: if (displayMode === 'heatmap' && options?.type === 'FFN' && ffnHeatmapEl && ffnSort && heatmapMetric) {
+	$: if (displayMode === 'heatmap' && options?.type === 'FFN' && ffnHeatmapEl && ffnSort && heatmapMetric && showValuesOnHeatmap !== undefined) {
 		renderFFNHeatmap();
 	}
 
@@ -1005,7 +1157,7 @@
 		}
 
 		// Size similarly to ATTN heatmaps: fill container width and use generous row height
-		const containerW = attnHeatmapEl.clientWidth || 600;
+		const containerW = 600; // Fixed width instead of adaptive
 		const margin = { top: 32, right: 12, bottom: 24, left: 100 }; // a touch more space top & bottom
 		const tokenAreaW = Math.max(300, containerW - margin.left - margin.right);
 		const rowH = 48; // larger rows for legibility like ATTN heatmap
@@ -1232,25 +1384,45 @@
 		const tooltip = d3.select(colorScaleTooltipEl);
 		tooltip.style('opacity', 0);
 	}
+
+	// Calculate optimal text color (black or white) based on background luminance
+	function getContrastTextColor(bgColor) {
+		if (!bgColor) return '#000';
+		try {
+			const color = d3.color(bgColor);
+			if (!color) return '#000';
+			const rgb = color.rgb();
+			// Calculate relative luminance using sRGB formula
+			const luminance = (0.299 * rgb.r + 0.587 * rgb.g + 0.114 * rgb.b) / 255;
+			// Use white text on dark backgrounds, black on light
+			return luminance < 0.5 ? '#fff' : '#000';
+		} catch {
+			return '#000';
+		}
+	}
 </script>
 
 
-<div style="max-width: 100%; overflow: hidden;">
+<div style="width: 100%;">
 	<div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 0.25rem; gap: 1rem;">
-		<div style="flex: 1; min-width: 0;">
-			{#if options.summary}
-			<div style="color:#4b5563; font-size: 0.925rem; margin-bottom: 0.25rem;">
-				Info: {options.summary}
+		<!-- Mode toggles on the left (always visible) -->
+		<div class="mode-toggle" style="flex-shrink: 0; display: flex; flex-direction: column; gap: 0.5rem;">
+			{#if options.type === 'ATTN'}
+			<div class="metric-toggle">
+				<label><input type="radio" name="metric-{options.type || 'default'}" value="nig" bind:group={heatmapMetric}> NIG</label>
+				<label><input type="radio" name="metric-{options.type || 'default'}" value="activation" bind:group={heatmapMetric}> Activation</label>
 			</div>
 			{/if}
-			<div style="color:#4b5563; font-size: 0.925rem;">
-				Shape: {JSON.stringify(getShape(options.values))}
-			</div>
+			<button 
+				class="btn btn-sm subset-btn"
+				class:active={showValuesOnHeatmap}
+				on:click={() => showValuesOnHeatmap = !showValuesOnHeatmap}
+			>Show Values</button>
 		</div>
 		
 		<!-- Color Scale Legend - always visible -->
 		<div class="color-scale-legend" style="flex-shrink: 0; padding-right: 0.5rem;">
-			<div style="font-size: 0.75rem; color:#6b7280; margin-bottom: 0.25rem; text-align: right;">
+			<div style="font-size: var(--text-label); color:#6b7280; margin-bottom: 0.25rem; text-align: right;">
 				{displayMode === 'heatmap' ? (heatmapMetric === 'activation' ? 'Activation' : 'NIG') : 'NIG'} Scale
 			</div>
 			<div class="color-scale-boxes">
@@ -1292,10 +1464,6 @@
 
 	<!-- FFN table -->
 	{:else if options.type === 'FFN' && Array.isArray(options.values)}
-		<div class="mode-toggle">
-			<button class:selected={displayMode === 'values'} on:click={() => displayMode = 'values'}>Values</button>
-			<button class:selected={displayMode === 'heatmap'} on:click={() => displayMode = 'heatmap'}>Heatmap</button>
-		</div>
 		{#if displayMode === 'values'}
 		<div class="ffn-table-container">
 			<table class="nig-table">
@@ -1322,6 +1490,7 @@
 							if (conditionalCursorEnabled) {
 								handleConditionalNigTarget(index, 'FFN');
 							} else {
+								// Use current tokenType (already selected when creating the table)
 								togglePruningTarget(index, 'FFN');
 							}
 						}}
@@ -1344,19 +1513,10 @@
 
 	<!-- ATTN table / heatmap -->
 	{:else if options.type === 'ATTN' && Array.isArray(options.values)}
-		<div class="mode-toggle">
-			<button class:selected={displayMode === 'values'} on:click={() => displayMode = 'values'}>Values</button>
-			<button class:selected={displayMode === 'heatmap'} on:click={() => displayMode = 'heatmap'}>Heatmap</button>
-			{#if displayMode === 'heatmap'}
-				<div class="metric-toggle">
-					<label><input type="radio" name="metric-attn" value="nig" bind:group={heatmapMetric}> NIG</label>
-					<label><input type="radio" name="metric-attn" value="activation" bind:group={heatmapMetric}> Activation</label>
-				</div>
-			{/if}
-		</div>
 
 		{#if displayMode === 'values'}
-			<table class="nig-table">
+			<div class="attn-table-container">
+				<table class="nig-table">
 				<thead>
 					<tr>
 						<th></th>
@@ -1392,20 +1552,22 @@
 							if (conditionalCursorEnabled) {
 								handleConditionalNigTarget(head.index, 'ATTN');
 							} else {
+								// Use current tokenType for this view (source/target based on orientation)
 								togglePruningTarget(head.index, 'ATTN');
 							}
 						}}
 					>
-						<td><div class="circle" style="background-color: {shouldCircleBeRed(head.index, 'ATTN') ? 'darkred' : d3.scaleSequential(d3.interpolateGreys).domain([minHeadScore, maxHeadScore]).clamp(true)(head.score)}"></div></td>
+						<td><div class="circle" style="background-color: {shouldCircleBeRed(head.index, 'ATTN') ? 'darkred' : d3.scaleSequential(d3.interpolateGreys).domain([minHeadScore, minHeadScore === maxHeadScore ? maxHeadScore + 1 : maxHeadScore]).clamp(true)(head.score)}"></div></td>
 						<td>head#{head.index}</td>
-						{#each head.row as val}
-						<td class:highlight-edge={isValueUsedInEdges(val)}>{formatValue(val)}</td>
+						{#each head.row as val, colIdx}
+						<td class:highlight-edge={isValueUsedInEdges(head.nigRow[colIdx])}>{formatValue(val)}</td>
 						{/each}
 					</tr>
 					{/each}
 				</tbody>
 				{/key}
-			</table>
+				</table>
+			</div>
 		{:else}
 			<div class="attn-heatmap-container">
 				<div class="attn-heatmap" bind:this={attnHeatmapEl}></div>
@@ -1431,7 +1593,6 @@
 	.nig-table {
 		width: 100%;
 		border-collapse: collapse;
-		margin-top: 1rem;
 	}
 	.nig-table th,
 	.nig-table td {
@@ -1442,6 +1603,25 @@
 	.sortable { cursor: pointer; user-select: none; }
 	.sort-icon { font-size: 0.8em; margin-left: 6px; opacity: 0.7; }
 	th.active { color: #16a34a; } /* green-600 */
+	
+	/* Qrels-style toggle button */
+	.subset-btn {
+		background-color: hsl(var(--b2, 0 0% 93%));
+		border: 1px solid hsl(var(--bc, 0 0% 20%) / 0.3);
+		color: hsl(var(--bc, 0 0% 20%));
+	}
+
+	.subset-btn:hover {
+		background-color: hsl(var(--b3, 0 0% 88%));
+	}
+
+	.subset-btn.active {
+		background-color: hsl(var(--p, 262 80% 50%));
+		border-color: hsl(var(--p, 262 80% 50%));
+		color: hsl(var(--pc, 0 0% 100%));
+		font-weight: 600;
+	}
+	
 	.circle {
 		width: 16px;
 		height: 16px;
@@ -1457,9 +1637,7 @@
 		overflow-x: auto;
 	}
 	.ffn-table-container {
-		max-width: 100%; /* Prevent horizontal overflow */
-		overflow-y: auto; /* Enable vertical scrolling */
-		overflow-x: auto; /* Allow horizontal scroll for wide content */
+		width: 100%;
 		margin-top: 1rem;
 		border: 1px solid #ddd;
 		border-radius: 4px;
@@ -1476,10 +1654,24 @@
 		box-shadow: 0 1px 0 rgba(0, 0, 0, 0.1);
 	}
 
+	/* ATTN table sizing */
+	.attn-table-container {
+		width: 100%;
+		margin-top: 1rem;
+		border: 1px solid #ddd;
+		border-radius: 4px;
+	}
+	.attn-table-container thead {
+		position: sticky;
+		top: 0;
+		background-color: white;
+		z-index: 1;
+		box-shadow: 0 1px 0 rgba(0, 0, 0, 0.1);
+	}
+
 	/* ATTN heatmap sizing */
 	.attn-heatmap-container {
-		max-width: 100%; /* Prevent horizontal overflow */
-		overflow: auto;
+		width: 100%;
 		border: 1px solid #ddd;
 		border-radius: 4px;
 		margin-top: 0.5rem;
@@ -1492,8 +1684,7 @@
 
 	/* FFN heatmap sizing */
 	.ffn-heatmap-container {
-		max-height: 500px;
-		overflow: auto;
+		width: 100%;
 		border: 1px solid #ddd;
 		border-radius: 4px;
 		margin-top: 0.5rem;
@@ -1510,7 +1701,7 @@
 		border: 1px solid #ccc;
 		border-radius: 4px;
 		padding: 6px 8px;
-		font-size: 12px;
+		font-size: var(--text-label);
 		box-shadow: 0 2px 4px rgba(0,0,0,0.08);
 		z-index: 9999;
 		transition: opacity 0.2s ease;
@@ -1525,13 +1716,13 @@
 	/* Align axis fonts with table header */
 	:global(.axis-x text),
 	:global(.axis-y text) {
-		font-size: 16px; /* match table header appearance */
+		font-size: var(--text-chart-title); /* match table header appearance */
 		font-family: inherit;
 		font-weight: 600; /* bold like table th */
 	}
 	/* axis uses same .sort-icon style as table */
 	:global(.axis-x .sort-icon) {
-		font-size: 10px;
+		font-size: var(--text-small);
 		opacity: 0.7;
 	}
 	/* Add small spacing above top axis like the table header row */
@@ -1542,19 +1733,19 @@
 	:global(.token-axis-x) {
 		transform: none !important;
 	}
-	:global(.axis-label) { font-size: 14px; fill: #374151; font-weight: 600; }
+	:global(.axis-label) { font-size: var(--text-chart-title); fill: #374151; font-weight: 600; }
 
 	/* Highlight cells that contribute to edges in the architecture */
 	.highlight-edge {
-		background-color: #fef3c7 !important; /* amber-100 */
-		border: 2px solid #f59e0b !important; /* amber-500 */
+		background-color: #f5f5f5 !important; /* light gray */
+		border: 2px solid #000000 !important; /* black */
 		font-weight: 700 !important;
-		box-shadow: 0 0 0 1px #f59e0b inset;
+		box-shadow: 0 0 0 1px #000000 inset;
 	}
 
 	/* Highlight FFN neuron rows that contribute to edges */
 	.edge-contributor {
-		background-color: #fef9e7; /* light amber tint */
+		background-color: #fafafa; /* very light gray tint */
 	}
 
 	.edge-contributor td {

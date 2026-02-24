@@ -125,7 +125,7 @@
     color: oklch(var(--bc));
     padding: 4px 8px;
     border-radius: 4px;
-    font-size: 11px;
+    font-size: var(--text-axis);
     font-weight: 600;
     pointer-events: none;
     box-shadow: 0 2px 8px rgba(0,0,0,0.15);
@@ -154,7 +154,7 @@
   }
   
   .tick .lbl { 
-    font-size: 11px; 
+    font-size: var(--text-axis); 
     color: oklch(var(--bc) / 0.6);
     margin-top: 2px; 
   }
@@ -176,7 +176,7 @@
   }
   
   .extent-tick .extent-lbl { 
-    font-size: 10px; 
+    font-size: var(--text-small); 
     color: oklch(var(--p));
     font-weight: 600; 
     margin-top: 28px;

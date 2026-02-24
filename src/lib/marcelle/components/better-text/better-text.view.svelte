@@ -18,6 +18,10 @@
   if (options$) {
     unsubscribeOptions = options$.subscribe((newOptions) => {
       options = newOptions || []; // Update options reactively
+      // Auto-refresh suggestions if the box is visible
+      if (suggestionsBox && suggestionsBox.style.display !== 'none') {
+        showSuggestions(value);
+      }
     });
   }
 
@@ -62,23 +66,40 @@
 
   function showSuggestions(val) {
     const filtered = options.filter(opt => opt.toLowerCase().includes(val.toLowerCase()));
-    if (!filtered.length) {
-      closeSuggestions();
-      return;
-    }
-
+    
     const rect = textarea.getBoundingClientRect();
     suggestionsBox.style.top = rect.bottom + window.scrollY + 'px';
     suggestionsBox.style.left = rect.left + window.scrollX + 'px';
     suggestionsBox.style.width = rect.width + 'px';
-    suggestionsBox.innerHTML = filtered.map((opt, i) => 
+    
+    // Build suggestions content
+    let html = '';
+    
+    // Show count header
+    const count = options.length;
+    html += `<div class="suggestion-count">${count} entr${count !== 1 ? 'ies' : 'y'} from dataset</div>`;
+    
+    if (!filtered.length) {
+      // Show "no results" message when filter returns nothing
+      html += `<div class="suggestion-empty">No matching passages found</div>`;
+      suggestionsBox.innerHTML = html;
+      suggestionsBox.style.display = 'block';
+      currentFocus = -1;
+      return;
+    }
+
+    // Add filtered suggestions
+    html += filtered.map((opt, i) => 
       `<div class="suggestion-item" data-index="${i}">${opt}</div>`
     ).join('');
+    
+    suggestionsBox.innerHTML = html;
     suggestionsBox.style.display = 'block';
 
     currentFocus = -1;
 
-    [...suggestionsBox.children].forEach(child => {
+    // Only attach event listeners to actual suggestion items (not the count header)
+    [...suggestionsBox.querySelectorAll('.suggestion-item')].forEach(child => {
       child.addEventListener('mouseover', () => {
         removeActive();
         currentFocus = parseInt(child.dataset.index);
@@ -95,8 +116,8 @@
   }
 
   function handleKeyDown(e) {
-    const items = suggestionsBox.children;
-    if (suggestionsBox.style.display === 'none') return;
+    const items = suggestionsBox.querySelectorAll('.suggestion-item');
+    if (suggestionsBox.style.display === 'none' || items.length === 0) return;
 
     if (e.key === 'ArrowDown') {
       currentFocus++;
@@ -118,21 +139,24 @@
 
   function addActive() {
     removeActive();
-    if (currentFocus > -1) {
-      suggestionsBox.children[currentFocus].classList.add('suggestion-active');
-      suggestionsBox.children[currentFocus].scrollIntoView({block: "nearest"});
+    const items = suggestionsBox.querySelectorAll('.suggestion-item');
+    if (currentFocus > -1 && currentFocus < items.length) {
+      items[currentFocus].classList.add('suggestion-active');
+      items[currentFocus].scrollIntoView({block: "nearest"});
     }
   }
 
   function removeActive() {
-    [...suggestionsBox.children].forEach(item => {
+    [...suggestionsBox.querySelectorAll('.suggestion-item')].forEach(item => {
       item.classList.remove('suggestion-active');
     });
   }
 
   function selectSuggestion(index) {
-    if (index > -1) {
-      value = suggestionsBox.children[index].textContent;
+    const items = suggestionsBox.querySelectorAll('.suggestion-item');
+    if (index > -1 && index < items.length) {
+      const selectedValue = items[index].textContent;
+      value = selectedValue;
       textarea.value = value; // Sync textarea directly for immediate measurement
       updateValue({ target: { value } });
       autoResizeTextarea();
@@ -200,6 +224,27 @@
   box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06) !important;
   overflow-y: auto !important;
   max-height: 200px !important;
+}
+
+:global(.suggestion-count) {
+  padding: 0.375rem 0.75rem;
+  font-size: 0.75rem;
+  color: #6b7280;
+  background: #f9fafb;
+  border-bottom: 1px solid #e5e7eb;
+  user-select: none;
+  pointer-events: none;
+  font-weight: 500;
+}
+
+:global(.suggestion-empty) {
+  padding: 0.75rem;
+  font-size: 0.8125rem;
+  color: #9ca3af;
+  text-align: center;
+  font-style: italic;
+  user-select: none;
+  pointer-events: none;
 }
 
 :global(.suggestion-item) {

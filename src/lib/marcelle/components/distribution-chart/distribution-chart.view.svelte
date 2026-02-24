@@ -91,9 +91,9 @@
     const data = flattenNigValues(values, type);
 
     // Fixed dimensions to prevent layout shifts
-    const width = 350;
-    const height = 250;
-    const margin = { top: 40, right: 20, bottom: 60, left: 50 };
+    const width = 380;
+    const height = 280;
+    const margin = { top: 50, right: 25, bottom: 90, left: 60 };
 
     if (!data.length) {
       const svg = d3.select(svgEl);
@@ -204,8 +204,8 @@
       .style('background', '#fff')
       .style('border', '1px solid #ddd')
       .style('border-radius', '12px')
-      .style('font-family', 'sans-serif')
-      .style('font-size', '13px');
+      .style('font-family', 'inherit')
+      .style('font-size', 'var(--text-chart-title)');
     svg.selectAll('*').remove();
 
     const g = svg.append('g').attr('transform', `translate(${margin.left},${margin.top})`);
@@ -271,7 +271,12 @@
       .attr('transform', `translate(0,${panelHeight})`)
       .call(d3.axisBottom(x).tickValues(xTickVals).tickFormat(fmtTickWithExtent))
       .call((g) => {
-        g.selectAll('text').style('font-size', '10px').attr('dy', '0.9em');
+        g.selectAll('text')
+          .style('font-size', 'var(--text-small)')
+          .attr('dy', '0.5em')
+          .attr('dx', '-0.5em')
+          .attr('transform', 'rotate(-45)')
+          .style('text-anchor', 'end');
         if (extent && Array.isArray(extent)) {
           g.selectAll('text').each(function(d) {
             if (Math.abs(d - extent[0]) < 1e-10 || Math.abs(d - extent[1]) < 1e-10) {
@@ -293,15 +298,6 @@
       d3.axisLeft(yHist).tickValues(yTickValues).tickFormat(d3.format('~s'))
     );
 
-    const titleStyle = { fill: '#333', 'font-size': '12px', 'font-weight': '600' };
-    g.append('text')
-      .attr('x', 0)
-      .attr('y', -22)
-      .attr('fill', titleStyle.fill)
-      .style('font-size', titleStyle['font-size'])
-      .style('font-weight', titleStyle['font-weight'])
-      .text('Signed distribution of IG values (log density)');
-
     const tooltip = d3.select('body').selectAll('.distribution-tooltip').data([null])
       .join('div')
       .attr('class', 'distribution-tooltip')
@@ -311,10 +307,10 @@
       .style('color', '#fff')
       .style('padding', '8px 12px')
       .style('border-radius', '6px')
-      .style('font-size', '12px')
+      .style('font-size', 'var(--text-label)')
       .style('pointer-events', 'none')
       .style('z-index', '1000')
-      .style('font-family', 'sans-serif')
+      .style('font-family', 'inherit')
       .style('line-height', '1.5');
 
     const yBase = 0;
@@ -359,16 +355,16 @@
 
     g.append('text')
       .attr('x', panelWidth / 2)
-      .attr('y', panelHeight + 36)
+      .attr('y', panelHeight + 55)
       .attr('fill', '#333')
       .style('text-anchor', 'middle')
-      .style('font-size', '11px')
+      .style('font-size', 'var(--text-axis)')
       .text('Integrated Gradients value');
     g.append('text')
       .attr('transform', `rotate(-90) translate(${-panelHeight / 2},${-40})`)
       .attr('fill', '#333')
       .style('text-anchor', 'middle')
-      .style('font-size', '11px')
+      .style('font-size', 'var(--text-axis)')
       .text('Count (log scale)');
 
     if (typeof threshold === 'number' && threshold >= 0 && threshold <= 1 && Number.isFinite(globalCutoff)) {
@@ -420,9 +416,9 @@
 
           g.append('text')
             .attr('x', panelWidth)
-            .attr('y', panelHeight + 54)
+            .attr('y', panelHeight + 73)
             .attr('fill', '#d32f2f')
-            .style('font-size', '11px')
+            .style('font-size', 'var(--text-axis)')
             .style('font-weight', '600')
             .style('text-anchor', 'end')
             .text(`cutoff = ±${fmtCutoff(thrPos)}`);
@@ -448,9 +444,9 @@
 
           g.append('text')
             .attr('x', panelWidth)
-            .attr('y', panelHeight + 54)
+            .attr('y', panelHeight + 73)
             .attr('fill', '#d32f2f')
-            .style('font-size', '11px')
+            .style('font-size', 'var(--text-axis)')
             .style('font-weight', '600')
             .style('text-anchor', 'end')
             .text(`cutoff = ${fmtCutoff(thrPos)}`);

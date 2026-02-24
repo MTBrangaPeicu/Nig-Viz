@@ -8,7 +8,7 @@ export class SubsetButtons extends Component {
     super();
     this.title = 'Subsets';
     this.$options = new BehaviorSubject(options);
-    this.$value = new BehaviorSubject(options[0] || 'Random');
+    this.$value = new BehaviorSubject('Random');
     this.id = id;
   }
 

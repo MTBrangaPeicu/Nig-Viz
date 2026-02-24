@@ -64,7 +64,7 @@
 
   // State for which sidebar panel is active
   let activeSidebarPanel = $state('input'); // Always holds the selected panel ID
-  let sidebarPaneSize = $state(0); // Actual size of the sidebar pane (bound to Pane)
+  let sidebarPaneSize = $state(20); // Actual size of the sidebar pane (bound to Pane) - open by default after login
   let outputVisible = $state(false);
 
   // Open sidebar when returning from query-review dashboard
@@ -78,6 +78,18 @@
   let conditionalNigPanel: any = $state(null); // Reference to ConditionalNigPanel for setTarget
   let hasNigData = $state(false); // Track if NIG data is loaded
   let currentThresholdValue = $state(0.01); // Track current threshold for conditional mode save/restore
+  
+  // Token IG results state
+  let activeDistributionsTab = $state('charts'); // 'charts' or 'tokenResults'
+  let igOutput = $state('');
+  
+  // Architecture zoom state
+  let archZoom = $state(1);
+  // Fixed architecture natural dimensions: SVG viewBox width=520, height=2038 (slider is outside transform)
+  const ARCH_SVG_HEIGHT = 2038;
+  const ARCH_SVG_WIDTH = 520;
+  let archContentEl: HTMLDivElement = $state()!; // Reference to content
+
 
   // Update body class when pruning mode changes
   $effect(() => {
@@ -170,6 +182,9 @@
   // Track last state for threshold updates
   let lastDistributionGeneralState: any = { values: null, type: null };
   let lastDistributionLayerState: any = { values: null, type: null };
+  
+  // Table summary info (populated from tableComponent.$options)
+  let tableSummary: string = $state('');
 
   onMount(() => {
     console.log('[PAGE] onMount - Creating architecture components...');
@@ -202,6 +217,15 @@
     nigConnection.passageInput = passageInputComponent;
     nigConnection.passageInput2 = passageInput2Component;
     nigConnection.numRepsInput = numRepsInputComponent;
+
+    // Subscribe to table options to update summary display
+    tableComponent.$options.subscribe((opts: any) => {
+      if (opts?.summary) {
+        tableSummary = opts.summary;
+      } else {
+        tableSummary = '';
+      }
+    });
 
     // Set up toggle subscriptions to update stores
     absoluteValuesToggle.$checked.subscribe((checked: boolean) => {
@@ -354,7 +378,6 @@
     const subsetSub = subsetButtonsComponent.$value.subscribe(
       (subset: string) => {
         if (!subset || !authChecked) return; // Wait for auth before requesting samples
-        const currentQuery = queryInputComponent.$value.getValue();
         if (nigConnection.selectedQueryId) {
           nigConnection.requestSamples({
             subset,
@@ -374,7 +397,7 @@
       );
       if (selectedSample) {
         nigConnection.selectedQueryId = selectedSample.query_id;
-        const subset = subsetButtonsComponent.$value.getValue();
+        const subset = subsetButtonsComponent.$value.getValue() || 'Random';
         nigConnection.requestSamples({
           query_id: selectedSample.query_id,
           subset,
@@ -416,7 +439,7 @@
           type: null,
           tokenType: null,
           values: null,
-          summary: 'Select two nodes in the architecture to see NIG details',
+          summary: '',
           globalNigExtent: nigConnection.globalNigExtent,
           globalAttnActivationExtent: nigConnection.globalAttnActivationExtent,
         });
@@ -575,7 +598,7 @@
           type: null,
           tokenType: null,
           values: null,
-          summary: 'Invalid selection pair',
+          summary: '',
           globalNigExtent: nigConnection.globalNigExtent,
           globalAttnActivationExtent: nigConnection.globalAttnActivationExtent,
           globalFFNActivationExtent: nigConnection.globalFFNActivationExtent,
@@ -586,12 +609,16 @@
       // Update table
       const pruningCutoffs = archComponent.pruningCutoffs$.getValue();
 
-      // Build readable summary
+      // Build readable summary - account for orientation
       let summaryText = `L${src.layer} ${type} ${tokenType}`;
-      if (orientation === 'srcToTgts') {
-        summaryText = `L${src.layer} ${type} ${tokenType}→`;
-      } else if (orientation === 'tgtsToSrcs') {
-        summaryText = `L${src.layer} ${type} →${tokenType}`;
+      if (orientation === 'srcToTgts' && sortTokenType) {
+        // ATTN -> FFN: showing source token flowing to targets, sorted by target token
+        summaryText = `L${src.layer} ${type} ${tokenType} → ${sortTokenType}`;
+      } else if (orientation === 'tgtsToSrcs' && sortTokenType) {
+        // FFN -> ATTN: showing targets flowing into source token, sorted by target token
+        summaryText = `L${src.layer} ${type} ${sortTokenType} → ${tokenType}`;
+      } else if (tgt.type !== 'TOP' && tgt.tokenType !== src.tokenType) {
+        summaryText += ` → ${tgt.tokenType}`;
       }
 
       tableComponent.$options.next({
@@ -701,16 +728,50 @@
       },
     );
 
+    // Subscribe to IG results (token-level integrated gradients)
+    const igDataSub = nigConnection.igData$.subscribe((doc: any) => {
+      if (!doc || !doc.result) return;
+      
+      if (doc.result.tokens && doc.result.attributions) {
+        const { tokens, attributions, error } = doc.result;
+        const html = tokens
+          .map((token: string, i: number) => {
+            const color = getTokenColor(attributions[i]);
+            return `<span style="color:${color}" title="${attributions[i].toFixed(4)}">${token}</span>`;
+          })
+          .join(' ');
+        igOutput = `${html}<br><br>Baseline Error: ${error?.toFixed(4) ?? 'N/A'}`;
+        // Auto-switch to Token Results tab when results arrive
+        activeDistributionsTab = 'tokenResults';
+      }
+    });
+
     return () => {
       nigDataSub.unsubscribe();
       archSelectionSub.unsubscribe();
       tableSelectionSub.unsubscribe();
       thresholdSub.unsubscribe();
       globalCutoffSub.unsubscribe();
+      igDataSub.unsubscribe();
       useAbsSub(); // Svelte store returns unsubscriber function
       archColorsSub(); // Svelte store returns unsubscriber function
     };
   });
+
+  // Color function for token IG visualization
+  function getTokenColor(attr: number): string {
+    let r, g, b;
+    if (attr > 0) {
+      g = Math.min(255, 128 + Math.floor(127 * attr));
+      b = Math.min(255, 128 - Math.floor(64 * attr));
+      r = Math.min(255, 128 - Math.floor(64 * attr));
+    } else {
+      g = Math.min(255, 128 + Math.floor(64 * attr));
+      b = Math.min(255, 128 + Math.floor(64 * attr));
+      r = Math.min(255, 127 - Math.floor(128 * attr));
+    }
+    return `rgb(${r},${g},${b})`;
+  }
 
   // Handle NIG results (from index.js lines 522-650)
   function handleNIGResult(doc: any) {
@@ -834,7 +895,7 @@
         hasNigData: true,
         layer: null,
         values: null,
-        summary: 'Select a layer/token above to see details',
+        summary: '',
         globalNigExtent: nigConnection.globalNigExtent,
         globalAttnActivationExtent: nigConnection.globalAttnActivationExtent,
         globalFFNActivationExtent: nigConnection.globalFFNActivationExtent,
@@ -988,7 +1049,8 @@
 </script>
 
 <svelte:head>
-  <title>NIG Visualization</title>
+  <title>IR Lens</title>
+  <link rel="icon" href="/favicon.png" />
 </svelte:head>
 
 {#if !authChecked}
@@ -1004,7 +1066,10 @@
     class="flex-shrink-0 bg-base-300 border-b border-base-content/10 px-4 py-2 flex items-center justify-between"
   >
     <div class="flex items-center gap-4">
-      <h1 class="text-lg font-semibold">NIG Visualization</h1>
+      <div class="flex items-center gap-2">
+        <img src="/favicon.png" alt="IR Lens" class="w-6 h-6" />
+        <h1 class="text-lg font-semibold">IR Lens</h1>
+      </div>
       <!-- Placeholder for future tabs -->
       <div class="tabs tabs-boxed bg-base-200">
         <button class="tab tab-active">Main</button>
@@ -1091,45 +1156,99 @@
               <!-- TOP SECTION: Architecture and Table side-by-side -->
               <Pane size={60} minSize={5}>
                 <!-- Inner horizontal = Left/Right split for Arch | Table -->
-                <Splitpanes theme="modern-theme">
+                <Splitpanes theme="modern-theme" class="h-full">
                   <!-- Architecture (Left) -->
-                  <Pane size={65} minSize={10}>
-                    <div
-                      class="h-full w-full flex flex-col bg-base-100 overflow-hidden"
-                    >
+                  <Pane size={65} minSize={20}>
+                    <div class="h-full w-full flex flex-col overflow-hidden bg-base-100">
+                      <!-- Header -->
                       <div
-                        class="px-4 py-2 border-b border-base-300 flex-shrink-0"
+                        class="px-4 py-2 border-b border-base-300 flex items-center justify-between flex-shrink-0"
                       >
                         <h2 class="text-sm font-semibold text-base-content/70">
                           Architecture
                         </h2>
+                        <div class="flex items-center gap-2">
+                          <!-- Zoom controls -->
+                          <div class="flex items-center gap-1 mr-2">
+                            <button 
+                              class="btn btn-xs btn-ghost px-1"
+                              onclick={() => {
+                                const snapped = Math.floor(archZoom * 4) / 4;
+                                archZoom = Math.max(0.5, snapped === archZoom ? archZoom - 0.25 : snapped);
+                              }}
+                              title="Zoom out"
+                            >
+                              −
+                            </button>
+                            <span class="text-xs text-base-content/60 w-10 text-center">{Math.round(archZoom * 100)}%</span>
+                            <button 
+                              class="btn btn-xs btn-ghost px-1"
+                              onclick={() => {
+                                const snapped = Math.ceil(archZoom * 4) / 4;
+                                archZoom = Math.min(1.5, snapped === archZoom ? archZoom + 0.25 : snapped);
+                              }}
+                              title="Zoom in"
+                            >
+                              +
+                            </button>
+                          </div>
+                          <span class="tooltip-wrapper">
+                            <span class="tooltip-icon">?</span>
+                            <span class="tooltip-text">Neural network layer structure showing attention heads and NIG attribution flow.</span>
+                          </span>
+                        </div>
                       </div>
-                      <!-- Threshold Slider Component -->
+                      <!-- Threshold Slider (tied to pane size not zoom) -->
                       <div
-                        class="flex-shrink-0 border-b border-base-300 overflow-hidden"
+                        class="border-b border-base-300 flex-shrink-0"
                         bind:this={thresholdSliderContainer}
                       ></div>
-                      <div
-                        class="flex-1 min-h-0 min-w-0 overflow-auto"
-                        bind:this={archContainer}
-                      ></div>
+                      <!-- Sticky token column labels - matches SVG grid: margin.left=100, gridSize=80 -->
+                      <div 
+                        class="flex-shrink-0 bg-base-100 flex"
+                        style="padding-left: {100 * archZoom}px; padding-top: {8 * archZoom}px; padding-bottom: {4 * archZoom}px;"
+                      >
+                        {#each ['cls', 'qry', 'sep1', 'doc', 'sep2'] as label}
+                          <span 
+                            class="text-center"
+                            style="width: {80 * archZoom}px; font-size: {14 * archZoom}px; font-family: sans-serif; color: #333;"
+                          >{label}</span>
+                        {/each}
+                      </div>
+                      <!-- Scrollable area fills remaining space -->
+                      <div class="flex-1 min-h-0 overflow-auto">
+                        <!-- Wrapper with scaled dimensions for proper scrollbar sizing -->
+                        <div style="width: {ARCH_SVG_WIDTH * archZoom}px; height: {ARCH_SVG_HEIGHT * archZoom}px;">
+                          <!-- Architecture content - scaled -->
+                          <div 
+                            bind:this={archContentEl}
+                            style="transform: scale({archZoom}); transform-origin: top left;"
+                          >
+                            <div bind:this={archContainer}></div>
+                          </div>
+                        </div>
+                      </div>
                     </div>
                   </Pane>
 
                   <!-- Table (Right) -->
                   <Pane size={35} minSize={10}>
                     <div
-                      class="h-full w-full flex flex-col bg-base-100 border-l border-base-300 overflow-hidden"
+                      class="h-full w-full flex flex-col bg-base-100 border-l border-base-300 overflow-auto"
                     >
                       <div
-                        class="px-4 py-2 border-b border-base-300 flex-shrink-0"
+                        class="px-4 py-2 border-b border-base-300 flex-shrink-0 flex items-center justify-between"
                       >
                         <h2 class="text-sm font-semibold text-base-content/70">
-                          NIG Table
+                          NIG Table{#if tableSummary} <span class="font-normal text-base-content/50">({tableSummary})</span>{/if}
                         </h2>
+                        <span class="tooltip-wrapper">
+                          <span class="tooltip-icon">?</span>
+                          <span class="tooltip-text">Tabular view of NIG values per layer and head. Click to select for pruning analysis.</span>
+                        </span>
                       </div>
                       <div
-                        class="flex-1 min-h-0 min-w-0 overflow-auto"
+                        class="min-w-0"
                         bind:this={tableContainer}
                       ></div>
                     </div>
@@ -1142,39 +1261,64 @@
                 <div
                   class="h-full w-full flex flex-col bg-base-100 border-t border-base-300 overflow-hidden"
                 >
-                  <div class="px-4 py-2 border-b border-base-300 flex-shrink-0">
-                    <h2 class="text-sm font-semibold text-base-content/70">
-                      Distributions & ECDF
-                    </h2>
+                  <div class="px-4 py-2 border-b border-base-300 flex-shrink-0 flex items-center justify-between">
+                    <div class="flex items-center">
+                      <!-- Tab-style headers -->
+                      <button 
+                        class="text-sm font-semibold px-3 py-1 rounded-l border-y border-l transition-colors {activeDistributionsTab === 'charts' ? 'bg-primary text-primary-content border-primary' : 'bg-base-200 text-base-content/70 border-base-300 hover:bg-base-300'}"
+                        onclick={() => activeDistributionsTab = 'charts'}
+                      >
+                        Distributions & ECDF
+                      </button>
+                      <button 
+                        class="text-sm font-semibold px-3 py-1 rounded-r border transition-colors {activeDistributionsTab === 'tokenResults' ? 'bg-primary text-primary-content border-primary' : 'bg-base-200 text-base-content/70 border-base-300 hover:bg-base-300'}"
+                        onclick={() => activeDistributionsTab = 'tokenResults'}
+                      >
+                        Token Results
+                      </button>
+                    </div>
+                    <span class="tooltip-wrapper">
+                      <span class="tooltip-icon">?</span>
+                      <span class="tooltip-text">{activeDistributionsTab === 'charts' ? 'Statistical distributions and cumulative density functions of NIG attribution values.' : 'Token-level integrated gradients visualization showing attribution per token.'}</span>
+                    </span>
                   </div>
-                  <!-- Three panels: Layer Distribution | General Distribution | ECDF -->
-                  <div class="flex-1 min-h-0 overflow-x-auto overflow-y-hidden">
+                  
+                  <!-- Tab Content -->
+                  <!-- Charts tab - use CSS visibility to preserve DOM -->
+                  <div class="flex-1 min-h-0 overflow-x-auto overflow-y-hidden" class:hidden={activeDistributionsTab !== 'charts'}>
                     <div class="flex flex-row gap-3 p-3">
                       <div class="flex-shrink-0">
-                        <h3
-                          class="text-xs font-medium text-base-content/60 mb-2"
-                        >
-                          Layer Distribution
-                        </h3>
-                        <div bind:this={distributionLayerContainer}></div>
-                      </div>
-                      <div class="flex-shrink-0">
-                        <h3
-                          class="text-xs font-medium text-base-content/60 mb-2"
-                        >
-                          General Distribution
-                        </h3>
+                        <h3 class="text-xs font-medium text-base-content/60 mb-2">Signed distribution of IG values (log density)</h3>
                         <div bind:this={distributionGeneralContainer}></div>
                       </div>
                       <div class="flex-shrink-0">
-                        <h3
-                          class="text-xs font-medium text-base-content/60 mb-2"
-                        >
-                          ECDF
-                        </h3>
+                        <h3 class="text-xs font-medium text-base-content/60 mb-2">ECDF + Mass-weighted ECDF of |NIG|</h3>
                         <div bind:this={ecdfContainer}></div>
                       </div>
+                      <div class="flex-shrink-0">
+                        <h3 class="text-xs font-medium text-base-content/60 mb-2">Layer distribution of IG values (log density)</h3>
+                        <div bind:this={distributionLayerContainer}></div>
+                      </div>
                     </div>
+                  </div>
+                  <!-- Token Results tab - use CSS visibility to preserve DOM -->
+                  <div class="flex-1 min-h-0 overflow-auto p-4" class:hidden={activeDistributionsTab !== 'tokenResults'}>
+                    {#if !igOutput}
+                      <div class="text-sm text-base-content/60">
+                        Click "Calculate Token IG" to compute token-level integrated gradients visualization.
+                      </div>
+                      <div class="mt-4 p-4 bg-base-200 border border-base-300 rounded">
+                        <p class="text-sm text-base-content/60">
+                          Results will appear here after calculation.
+                        </p>
+                      </div>
+                    {:else}
+                      <div class="p-4 bg-base-200 border border-base-300 rounded">
+                        <div class="text-base leading-relaxed">
+                          {@html igOutput}
+                        </div>
+                      </div>
+                    {/if}
                   </div>
 
                   <!-- Output Console at bottom (always visible, never pushed off screen) -->
@@ -1184,6 +1328,7 @@
                       conditionalStatusStream={nigConnection.conditionalNigStatus$}
                       forwardPassStatusStream={nigConnection.forwardPassStatus$}
                       prunedForwardPassStatusStream={nigConnection.prunedForwardPassStatus$}
+                      igStatusStream={nigConnection.igStatus$}
                       connection={nigConnection}
                       pruningState$={archComponent?.pruningState$}
                     />
@@ -1218,5 +1363,56 @@
 
   :global(.modern-theme.splitpanes .splitpanes__splitter:hover) {
     @apply bg-primary/50;
+  }
+  
+  .tooltip-wrapper {
+    position: relative;
+    display: inline-flex;
+  }
+  
+  .tooltip-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.25rem;
+    height: 1.25rem;
+    font-size: 0.75rem;
+    font-weight: 700;
+    border-radius: 50%;
+    background-color: hsl(var(--b3));
+    color: hsl(var(--bc) / 0.7);
+    cursor: help;
+    border: 2px solid hsl(var(--bc) / 0.3);
+  }
+  
+  .tooltip-wrapper:hover .tooltip-icon {
+    background-color: hsl(var(--p));
+    color: hsl(var(--pc));
+    border-color: hsl(var(--p));
+  }
+  
+  .tooltip-text {
+    visibility: hidden;
+    opacity: 0;
+    position: absolute;
+    right: 0;
+    top: 100%;
+    margin-top: 0.5rem;
+    padding: 0.625rem 0.75rem;
+    background-color: #1a1a1a;
+    color: #ffffff;
+    font-size: 0.75rem;
+    font-weight: 400;
+    border-radius: 0.375rem;
+    width: 220px;
+    z-index: 1000;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+    line-height: 1.5;
+    transition: opacity 0.15s ease, visibility 0.15s ease;
+  }
+  
+  .tooltip-wrapper:hover .tooltip-text {
+    visibility: visible;
+    opacity: 1;
   }
 </style>

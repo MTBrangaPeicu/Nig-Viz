@@ -419,7 +419,7 @@
     flex: 1;
   }
   .slider-value {
-    font-size: 0.8rem;
+    font-size: var(--text-label);
     font-weight: 600;
     width: 60px;
     text-align: right;

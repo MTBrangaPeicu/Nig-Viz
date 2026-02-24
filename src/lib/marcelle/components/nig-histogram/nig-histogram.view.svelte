@@ -253,8 +253,8 @@
       .style('background', '#fff')
       .style('border', '1px solid #ddd')
       .style('border-radius', '12px')
-      .style('font-family', 'sans-serif')
-      .style('font-size', '13px');
+      .style('font-family', 'inherit')
+      .style('font-size', 'var(--text-chart-title)');
     // Clear previous render
     svg.selectAll('*').remove();
 
@@ -343,7 +343,7 @@
       .attr('transform', `translate(0,${panelHeight})`)
       .call(d3.axisBottom(x).tickValues(xTickVals).tickFormat(fmtTickWithExtent))
       .call((g) => {
-        g.selectAll('text').style('font-size', '10px').attr('dy', '0.9em');
+        g.selectAll('text').style('font-size', 'var(--text-small)').attr('dy', '0.9em');
         // Style extent ticks in blue
         if (extent && Array.isArray(extent)) {
           g.selectAll('text').each(function(d) {
@@ -371,7 +371,7 @@
     gCdf.append('g')
       .attr('transform', `translate(0,${panelHeight})`)
       .call(d3.axisBottom(xAbs).tickValues(xAbsTickVals).tickFormat((d) => fmtPlain(d)))
-      .call((g) => g.selectAll('text').style('font-size', '10px').attr('dy', '0.9em'));
+      .call((g) => g.selectAll('text').style('font-size', 'var(--text-small)').attr('dy', '0.9em'));
     gCdf.append('g').call(d3.axisLeft(yCdf).ticks(5));
 
     // ECDF x-axis label (changes based on mode)
@@ -380,11 +380,11 @@
       .attr('y', panelHeight + 36)
       .attr('fill', '#333')
       .style('text-anchor', 'middle')
-      .style('font-size', '11px')
+      .style('font-size', 'var(--text-axis)')
       .text(useAbsoluteValues ? '|NIG| value' : 'Positive NIG values');
 
     // Titles (placed in header area to avoid overlap)
-    const titleStyle = { fill: '#333', 'font-size': '12px', 'font-weight': '600' };
+    const titleStyle = { fill: '#333', 'font-size': 'var(--text-label)', 'font-weight': '600' };
     gHist.append('text')
       .attr('x', 0)
       .attr('y', -22)
@@ -411,10 +411,10 @@
       .style('color', '#fff')
       .style('padding', '8px 12px')
       .style('border-radius', '6px')
-      .style('font-size', '12px')
+      .style('font-size', 'var(--text-label)')
       .style('pointer-events', 'none')
       .style('z-index', '1000')
-      .style('font-family', 'sans-serif')
+      .style('font-family', 'inherit')
       .style('line-height', '1.5');
 
     // Signed histogram bars with symlog y-axis
@@ -465,13 +465,13 @@
       .attr('y', panelHeight + 36)
       .attr('fill', '#333')
       .style('text-anchor', 'middle')
-      .style('font-size', '11px')
+      .style('font-size', 'var(--text-axis)')
       .text('Integrated Gradients value');
     gHist.append('text')
       .attr('transform', `rotate(-90) translate(${-panelHeight / 2},${-40})`)
       .attr('fill', '#333')
       .style('text-anchor', 'middle')
-      .style('font-size', '11px')
+      .style('font-size', 'var(--text-axis)')
       .text('Count (log scale)');
 
     // ECDF (count-based) and mass-weighted ECDF
@@ -534,7 +534,7 @@
         .attr('x', legendX - 75)
         .attr('y', yRow - 2)
         .attr('fill', '#333')
-        .style('font-size','11px')
+        .style('font-size', 'var(--text-axis)')
         .text(item.text);
     });
 
@@ -603,7 +603,7 @@
             .attr('x', panelWidth)
             .attr('y', panelHeight + 54)
             .attr('fill', '#d32f2f')
-            .style('font-size', '11px')
+            .style('font-size', 'var(--text-axis)')
             .style('font-weight', '600')
             .style('text-anchor', 'end')
             .text(`cutoff = ±${fmtCutoff(thrPos)}`);
@@ -636,7 +636,7 @@
             .attr('x', panelWidth)
             .attr('y', panelHeight + 54)
             .attr('fill', '#d32f2f')
-            .style('font-size', '11px')
+            .style('font-size', 'var(--text-axis)')
             .style('font-weight', '600')
             .style('text-anchor', 'end')
             .text(`cutoff = ${fmtCutoff(thrPos)}`);
@@ -653,7 +653,7 @@
         .attr('y', -18)
         .attr('fill', titleStyle.fill)
         .style('text-anchor', 'end')
-        .style('font-size', '11px')
+        .style('font-size', 'var(--text-axis)')
         .text(useAbsoluteValues 
           ? `Top ${(threshold * 100).toFixed(1)}% by |NIG|`
           : `Top ${(threshold * 100).toFixed(1)}% of NIG`);
@@ -678,7 +678,7 @@
         .attr('x', panelWidth)
         .attr('y', panelHeight + 54)
         .attr('fill', 'crimson')
-        .style('font-size', '11px')
+        .style('font-size', 'var(--text-axis)')
         .style('font-weight', '600')
         .style('text-anchor', 'end')
         .text(useAbsoluteValues 
@@ -696,7 +696,7 @@
         .attr('y', -6)
         .attr('fill', titleStyle.fill)
         .style('text-anchor', 'end')
-        .style('font-size', '11px')
+        .style('font-size', 'var(--text-axis)')
         .text(useAbsoluteValues
           ? `Removes ~${(removedMass * 100).toFixed(1)}% of total |NIG| mass`
           : `Removes ~${(removedMass * 100).toFixed(1)}% of positive NIG mass`);

@@ -1,7 +1,5 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { goto } from '$app/navigation';
-  import { base } from '$app/paths';
   import { get } from 'svelte/store';
   import type { NIGConnection } from '$lib/services/nig-connection';
   import { sharedBaseline } from '$lib/stores';
@@ -65,6 +63,7 @@
   let statusMessage = $state('Ready');
   let isProcessing = $state(false);
   let isConditionalProcessing = $state(false);
+  let isIgProcessing = $state(false);
 
   // Use $effect to reactively mount components when they become available
   $effect(() => {
@@ -136,9 +135,17 @@
       }
     });
 
+    // Subscribe to IG status
+    const igStatusSub = connection.igStatus$.subscribe((status: any) => {
+      if (status) {
+        isIgProcessing = status.status === 'processing' || status.status === 'pending';
+      }
+    });
+
     return () => {
       statusSub.unsubscribe();
       conditionalStatusSub.unsubscribe();
+      igStatusSub.unsubscribe();
     };
   });
 
@@ -164,6 +171,18 @@
       baselineLabel: baseline
     });
   }
+
+  function handleCalculateTokenIG() {
+    if (!connection || !queryInput || !passageInput) return;
+    
+    connection.submitIG({
+      query: queryInput.$value.getValue(),
+      passage: passageInput.$value.getValue(),
+      passage2: passageInput2?.$value?.getValue?.() || '',
+      numReps: numRepsInput.$value.getValue(),
+      baselineLabel: baseline
+    });
+  }
 </script>
 
 <div 
@@ -171,9 +190,23 @@
 >
   {#if visible}
     <div class="flex-1 overflow-y-auto p-4 space-y-4">
+      <!-- Inputs Section Header -->
+      <div class="section-header">
+        <span class="section-title">Inputs</span>
+        <span class="tooltip-wrapper">
+          <span class="tooltip-icon">?</span>
+          <span class="tooltip-text">Select a query, filter by relevance level, then choose a passage for NIG analysis.</span>
+        </span>
+      </div>
+
       <!-- Query Input - Marcelle betterText component -->
       <div class="marcelle-component">
         <div bind:this={queryContainer}></div>
+      </div>
+
+      <!-- Subset Selection (Qrels) - Marcelle subsetButtons component - above passage for filtering -->
+      <div class="marcelle-component">
+        <div bind:this={subsetContainer}></div>
       </div>
 
       <!-- Passage Input 1 - Marcelle betterText component -->
@@ -186,9 +219,15 @@
         <div bind:this={passage2Container}></div>
       </div> -->
 
-      <!-- Subset Selection - Marcelle subsetButtons component -->
-      <div class="marcelle-component">
-        <div bind:this={subsetContainer}></div>
+      <div class="divider"></div>
+
+      <!-- NIG Parameters Section Header -->
+      <div class="section-header">
+        <span class="section-title">NIG Parameters</span>
+        <span class="tooltip-wrapper">
+          <span class="tooltip-icon">?</span>
+          <span class="tooltip-text">Set the number of integration steps and baseline type for computing attributions.</span>
+        </span>
       </div>
 
       <!-- Number of Repetitions - Marcelle betterNumber component -->
@@ -197,19 +236,21 @@
       </div>
 
       <!-- Baseline Selection -->
-      <div class="form-control w-full flex flex-col">
-        <label class="label" for="baseline-select">
-          <span class="label-text font-semibold">Baseline</span>
-        </label>
-        <select 
-          id="baseline-select"
-          class="select select-bordered select-sm text-sm w-full"
-          bind:value={baseline}
-        >
-          {#each baselineOptions as option}
-            <option value={option}>{option}</option>
-          {/each}
-        </select>
+      <div class="marcelle-component">
+        <div class="form-control w-full flex flex-col">
+          <label class="label" for="baseline-select">
+            <span class="label-text font-semibold">Baseline</span>
+          </label>
+          <select 
+            id="baseline-select"
+            class="select select-bordered select-sm w-full"
+            bind:value={baseline}
+          >
+            {#each baselineOptions as option}
+              <option value={option}>{option}</option>
+            {/each}
+          </select>
+        </div>
       </div>
 
       <div class="divider"></div>
@@ -227,12 +268,79 @@
         
         <button 
           class="btn btn-outline btn-block btn-sm"
-          disabled={isProcessing || isConditionalProcessing}
-          onclick={() => goto(`${base}/query-review`)}
+          class:btn-disabled={isIgProcessing || isProcessing || isConditionalProcessing}
+          disabled={isIgProcessing || isProcessing || isConditionalProcessing}
+          onclick={handleCalculateTokenIG}
         >
-          Query Review Dashboard
+          {isIgProcessing ? 'Calculating...' : 'Calculate Token IG'}
         </button>
       </div>
     </div>
   {/if}
 </div>
+
+<style>
+  .section-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 0.25rem;
+  }
+  
+  .section-title {
+    font-weight: 600;
+    font-size: 0.875rem;
+    color: hsl(var(--bc) / 0.8);
+  }
+  
+  .tooltip-wrapper {
+    position: relative;
+    display: inline-flex;
+  }
+  
+  .tooltip-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.25rem;
+    height: 1.25rem;
+    font-size: 0.75rem;
+    font-weight: 700;
+    border-radius: 50%;
+    background-color: hsl(var(--b3));
+    color: hsl(var(--bc) / 0.7);
+    cursor: help;
+    border: 2px solid hsl(var(--bc) / 0.3);
+  }
+  
+  .tooltip-wrapper:hover .tooltip-icon {
+    background-color: hsl(var(--p));
+    color: hsl(var(--pc));
+    border-color: hsl(var(--p));
+  }
+  
+  .tooltip-text {
+    visibility: hidden;
+    opacity: 0;
+    position: absolute;
+    right: 0;
+    top: 100%;
+    margin-top: 0.5rem;
+    padding: 0.625rem 0.75rem;
+    background-color: #1a1a1a;
+    color: #ffffff;
+    font-size: 0.75rem;
+    font-weight: 400;
+    border-radius: 0.375rem;
+    width: 200px;
+    z-index: 1000;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+    line-height: 1.5;
+    transition: opacity 0.15s ease, visibility 0.15s ease;
+  }
+  
+  .tooltip-wrapper:hover .tooltip-text {
+    visibility: visible;
+    opacity: 1;
+  }
+</style>

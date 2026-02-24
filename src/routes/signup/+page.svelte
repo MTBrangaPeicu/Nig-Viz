@@ -27,25 +27,25 @@
     err = null;
 
     const formData = new FormData(e.currentTarget);
+    const username = (formData.get('username') || '').toString();
+    const email = `${username}@local.app`; // Auto-generate email from username
     store
       .signup({
-        email: (formData.get('email') || '').toString(),
-        username: (formData.get('username') || '').toString(),
+        email: email,
+        username: username,
         password: (formData.get('password') || '').toString(),
       })
       .then((user) => {
         notification({
-          title: `Welcome ${(user as User).username || (user as User).email}`,
+          title: `Welcome ${(user as User).username || username}`,
           message: 'Your account has been created',
         });
         goto(`${base}/`);
       })
       .catch((error: any) => {
         if (error.name === 'Conflict') {
-          if (error.message.includes('email')) {
-            error.data = { email: error.message };
-          } else if (error.message.includes('username')) {
-            error.data = { username: error.message };
+          if (error.message.includes('email') || error.message.includes('username')) {
+            error.data = { username: 'Username already exists' };
           }
         } else if (Array.isArray(error.data) && error.data.length > 0) {
           error.data = error.data.reduce(
@@ -85,45 +85,18 @@
 
   <form on:submit|preventDefault={signup}>
     <div class="form-control w-full mb-4">
-      <label class="label" for="email">
-        <span class="label-text">Email</span>
-      </label>
-      <label
-        class="input input-bordered flex items-center gap-2"
-        class:input-error={err?.data?.email}
-      >
-        <svg
-          xmlns="http://www.w3.org/2000/svg"
-          viewBox="0 0 16 16"
-          fill="currentColor"
-          class="w-4 h-4 opacity-70"
-          ><path
-            d="M2.5 3A1.5 1.5 0 0 0 1 4.5v.793c.026.009.051.02.076.032L7.674 8.51c.206.1.446.1.652 0l6.598-3.185A.755.755 0 0 1 15 5.293V4.5A1.5 1.5 0 0 0 13.5 3h-11Z"
-          /><path
-            d="M15 6.954 8.978 9.86a2.25 2.25 0 0 1-1.956 0L1 6.954V11.5A1.5 1.5 0 0 0 2.5 13h11a1.5 1.5 0 0 0 1.5-1.5V6.954Z"
-          /></svg
-        >
-        <input type="email" name="email" class="grow" placeholder="Email" required />
-      </label>
-      {#if err?.data?.email}
-        <div class="label">
-          <span class="label-text-alt text-error">{err?.data?.email}</span>
-        </div>
-      {/if}
-    </div>
-    <div class="form-control w-full mb-4">
       <label class="label" for="username">
         <span class="label-text">Username</span>
       </label>
       <label
-        class="input input-bordered flex items-center gap-2"
+        class="input input-bordered input-lg w-full flex items-center gap-2"
         class:input-error={err?.data?.username}
       >
         <svg
           xmlns="http://www.w3.org/2000/svg"
           viewBox="0 0 16 16"
           fill="currentColor"
-          class="w-4 h-4 opacity-70"
+          class="w-5 h-5 opacity-70"
           ><path
             d="M8 8a3 3 0 1 0 0-6 3 3 0 0 0 0 6ZM12.735 14c.618 0 1.093-.561.872-1.139a6.002 6.002 0 0 0-11.215 0c-.22.578.254 1.139.872 1.139h9.47Z"
           /></svg
@@ -141,14 +114,14 @@
         <span class="label-text">Choose a Password (min 8 characters)</span>
       </label>
       <label
-        class="input input-bordered flex items-center gap-2"
+        class="input input-bordered input-lg w-full flex items-center gap-2"
         class:input-error={err?.data?.password}
       >
         <svg
           xmlns="http://www.w3.org/2000/svg"
           viewBox="0 0 16 16"
           fill="currentColor"
-          class="w-4 h-4 opacity-70"
+          class="w-5 h-5 opacity-70"
           ><path
             fill-rule="evenodd"
             d="M14 6a4 4 0 0 1-4.899 3.899l-1.955 1.955a.5.5 0 0 1-.353.146H5v1.5a.5.5 0 0 1-.5.5h-2a.5.5 0 0 1-.5-.5v-2.293a.5.5 0 0 1 .146-.353l3.955-3.955A4 4 0 1 1 14 6Zm-4-2a.75.75 0 0 0 0 1.5.5.5 0 0 1 .5.5.75.75 0 0 0 1.5 0 2 2 0 0 0-2-2Z"
@@ -163,7 +136,7 @@
         </div>
       {/if}
     </div>
-    <button class="btn btn-primary w-full mt-4" type="submit">Create Account</button>
+    <button class="btn btn-primary btn-lg w-full mt-4" type="submit">Create Account</button>
   </form>
   <div class="text-right mt-8">
     Already have an account?

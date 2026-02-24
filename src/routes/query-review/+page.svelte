@@ -124,8 +124,21 @@
               (s: any) => s.query === queryToUse,
             );
             if (selectedSample) {
-              const passages = selectedSample.passages.map(
-                (p: any) => p.text,
+              // Format passages with relevance label prefix (e.g., "3 | passage text")
+              // Sort by relevance: highest number first, N/A last
+              const sortedPassages = [...selectedSample.passages].sort((a: any, b: any) => {
+                const labelA = a.label || 'N/A';
+                const labelB = b.label || 'N/A';
+                if (labelA === 'N/A' && labelB !== 'N/A') return 1;
+                if (labelB === 'N/A' && labelA !== 'N/A') return -1;
+                if (labelA === 'N/A' && labelB === 'N/A') return 0;
+                return parseInt(labelB) - parseInt(labelA);
+              });
+              const passages = sortedPassages.map(
+                (p: any) => {
+                  const label = p.label || 'N/A';
+                  return `${label} | ${p.text}`;
+                },
               );
               passageInput.updateOptions(passages);
               passageInput2.updateOptions(passages);
@@ -152,7 +165,6 @@
     const subsetSub = subsetButtonsComponent.$value.subscribe(
       (subset: string) => {
         if (!subset) return;
-        const currentQuery = queryInput.$value.getValue();
         if (nigConnection.selectedQueryId) {
           nigConnection.requestSamples({
             subset,

@@ -963,7 +963,7 @@
 	}
 
 	const gridSize = 80;
-	const margin = { top: 40, right: 20, bottom: 60, left: 100 };
+	const margin = { top: 10, right: 20, bottom: 60, left: 100 };
 
 	onMount(() => {
 		// Create custom tooltip element
@@ -975,7 +975,8 @@
 		// Set fixed grid size and margins
 
 		const numLayers = 24;
-		const svgWidth = 800;
+		const numTokenTypes = 5; // cls, qry, sep1, doc, sep2
+		const svgWidth = margin.left + (numTokenTypes * gridSize) + margin.right;
 		const svgHeight = margin.top + margin.bottom + numLayers * gridSize + yShift;
 
 		svg = d3.select("#architecture-grid")
@@ -1172,16 +1173,7 @@
 			.text(d => d)
 			.attr("class", "token-label-bottom");
 
-		// Add token labels at the top
-		svg.selectAll(".token-label-top")
-			.data(tokenTypes)
-			.enter()
-			.append("text")
-			.attr("x", (_, i) => margin.left + i * gridSize + gridSize / 2)
-			.attr("y", barY - 5) // Position above the top bar (updated with offset)
-			.attr("text-anchor", "middle")
-			.text(d => d)
-			.attr("class", "token-label-top");
+		// Top labels removed - handled by sticky header in page layout
 
 		svg.selectAll(".layer-label")
 			.data(layers)
@@ -1218,22 +1210,23 @@
 </script>
 
 <div>
-	<div id="architecture-grid" style="width: 100%; height: 100%;"></div>
+	<div id="architecture-grid"></div>
 </div>
 
 
 <style>
-	/* Make the architecture grid scrollable */
+	/* Architecture grid - fixed width to match SVG viewBox, no internal scrolling */
 	#architecture-grid {
-		width: 100%;
-		height: 100%;
-		overflow: auto;
-		border: 1px solid #ddd;
-		border-radius: 4px;
-		min-width: 0;
-		min-height: 0;
+		width: 520px;
 	}
-		@keyframes pulseGrow {
+
+	:global(.token-label-bottom) {
+		font-family: sans-serif;
+		font-size: 14px;
+		fill: #333;
+	}
+
+	@keyframes pulseGrow {
 	0% { filter: drop-shadow(0 0 0px #22C55E); }
 	50% { filter: drop-shadow(0 0 10px #22C55E); }
 	100% { filter: drop-shadow(0 0 0px #22C55E); }

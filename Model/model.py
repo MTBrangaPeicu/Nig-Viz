@@ -60,8 +60,10 @@ except Exception:
 # Build qrels maps:
 #  - qrels_by_q: query_id -> list of judged doc_ids (any level)
 #  - qrels_by_q_level: query_id -> { level(int) -> list of doc_ids }
+#  - qrels_doc_relevance: (query_id, doc_id) -> relevance level (for reverse lookup)
 qrels_by_q = defaultdict(list)
 qrels_by_q_level = defaultdict(lambda: defaultdict(list))
+qrels_doc_relevance = {}  # Maps (query_id, doc_id) -> relevance level
 for qr in ir_ds.qrels_iter():
     try:
         rel = int(getattr(qr, "relevance", 0))
@@ -71,6 +73,7 @@ for qr in ir_ds.qrels_iter():
     did = qr.doc_id
     qrels_by_q[qid].append(did)
     qrels_by_q_level[qid][rel].append(did)
+    qrels_doc_relevance[(qid, did)] = rel
 
 for qid, lst in qrels_by_q.items():
     random.shuffle(lst)
@@ -244,8 +247,9 @@ tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
 
 def get_random_samples(max_queries=10, subset="Random", max_passages_per_query=10):
     """
-    Return a list of samples where each sample is { query_id, query, passages: [{text},...] }.
+    Return a list of samples where each sample is { query_id, query, passages: [{text, label},...] }.
     subset can be 'Random', 'Rel=0', 'Rel=1', etc.
+    label contains the relevance level for judged docs, or 'N/A' for random.
     """
     samples = []
 
@@ -256,7 +260,8 @@ def get_random_samples(max_queries=10, subset="Random", max_passages_per_query=1
         query_id = q.query_id
         query_text = q.text
 
-        # choose doc ids per subset
+        # choose doc ids per subset - track relevance level
+        relevance_level = None  # None means random/unjudged
         if subset == "Random":
             # Get random documents from entire dataset, excluding judged docs for this query
             judged_docs = set(qrels_by_q.get(query_id, []))
@@ -274,23 +279,22 @@ def get_random_samples(max_queries=10, subset="Random", max_passages_per_query=1
             doc_ids = all_docs_sample[:max_passages_per_query]
         else:
             # For relevance levels, use judged docs for this specific query
-            level = None
             try:
                 if subset.startswith("Rel="):
-                    level = int(subset.split("=", 1)[1])
+                    relevance_level = int(subset.split("=", 1)[1])
             except Exception:
-                level = None
-            if level is None:
+                relevance_level = None
+            if relevance_level is None:
                 doc_ids = qrels_by_q.get(query_id, [])
             else:
-                doc_ids = qrels_by_q_level.get(query_id, {}).get(level, [])
+                doc_ids = qrels_by_q_level.get(query_id, {}).get(relevance_level, [])
 
         if not doc_ids:
             continue
 
         chosen = doc_ids[:max_passages_per_query]
 
-        # fetch texts for chosen doc_ids
+        # fetch texts for chosen doc_ids (preserve order for relevance lookup)
         passages = []
         if docs_store is not None:
             for did in chosen:
@@ -298,17 +302,26 @@ def get_random_samples(max_queries=10, subset="Random", max_passages_per_query=1
                 if d is not None:
                     txt = getattr(d, "text", "") or ""
                     if txt:
-                        passages.append({"text": txt})
+                        # Look up relevance level from qrels_doc_relevance
+                        rel = qrels_doc_relevance.get((query_id, did), None)
+                        label = str(rel) if rel is not None else "N/A"
+                        passages.append({"text": txt, "label": label})
         else:
             # docs_store unavailable, iterate all docs
             needed = set(chosen)
+            doc_id_order = {did: i for i, did in enumerate(chosen)}
+            passage_map = {}
             for d in ir_ds.docs_iter():
                 if d.doc_id in needed:
                     txt = getattr(d, "text", "") or ""
                     if txt:
-                        passages.append({"text": txt})
-                if len(passages) == len(chosen):
+                        rel = qrels_doc_relevance.get((query_id, d.doc_id), None)
+                        label = str(rel) if rel is not None else "N/A"
+                        passage_map[d.doc_id] = {"text": txt, "label": label}
+                if len(passage_map) == len(chosen):
                     break
+            # Maintain order
+            passages = [passage_map[did] for did in chosen if did in passage_map]
 
         if passages:
             samples.append({
@@ -323,63 +336,48 @@ def get_random_samples(max_queries=10, subset="Random", max_passages_per_query=1
 def get_passages_for_query(query_id, subset="Random", max_passages_per_query=10):
     """
     Fetch passages for a single query.
-    subset: 'Random', 'Rel=0', 'Rel=1', ...
+    subset: 'Random' or 'Rel=0', 'Rel=1', etc.
     Returns { query_id, query, passages: [{text}, ...] }
     """
     if not query_id:
         return {"query_id": query_id, "query": "", "passages": []}
 
-    # choose doc ids per subset
+    doc_ids = []
     if subset == "Random":
-        # Get random documents from entire dataset, excluding judged docs for this query
         judged_docs = set(qrels_by_q.get(query_id, []))
-        
-        # Collect random doc_ids from the entire dataset
-        all_docs_sample = []
+        count = 0
         for d in ir_ds.docs_iter():
             if d.doc_id not in judged_docs:
-                all_docs_sample.append(d.doc_id)
-            # Sample enough to get good randomness
-            if len(all_docs_sample) >= 1000:
+                doc_ids.append(d.doc_id)
+                count += 1
+            if count >= max_passages_per_query:
                 break
-        # Shuffle and take max_passages_per_query
-        random.shuffle(all_docs_sample)
-        doc_ids = all_docs_sample[:max_passages_per_query]
-    else:
-        # For relevance levels, use judged docs for this specific query
-        level = None
+    elif subset.startswith("Rel="):
         try:
-            if subset.startswith("Rel="):
-                level = int(subset.split("=", 1)[1])
+            level = int(subset.split("=", 1)[1])
+            doc_ids = qrels_by_q_level.get(query_id, {}).get(level, [])[:max_passages_per_query]
         except Exception:
-            level = None
-        if level is None:
-            doc_ids = qrels_by_q.get(query_id, [])
-        else:
-            doc_ids = qrels_by_q_level.get(query_id, {}).get(level, [])
+            pass
 
     if not doc_ids:
         return {"query_id": query_id, "query": queries_by_id.get(query_id, ""), "passages": []}
 
-    chosen = doc_ids[:max_passages_per_query]
-
-    # fetch texts
     passages = []
     if docs_store is not None:
-        for did in chosen:
+        for did in doc_ids:
             d = docs_store.get(did)
             if d is not None:
                 txt = getattr(d, "text", "") or ""
                 if txt:
                     passages.append({"text": txt})
     else:
-        needed = set(chosen)
+        needed = set(doc_ids)
         for d in ir_ds.docs_iter():
             if d.doc_id in needed:
                 txt = getattr(d, "text", "") or ""
                 if txt:
                     passages.append({"text": txt})
-                if len(passages) == len(chosen):
+                if len(passages) == len(needed):
                     break
 
     return {"query_id": query_id, "query": queries_by_id.get(query_id, ""), "passages": passages}

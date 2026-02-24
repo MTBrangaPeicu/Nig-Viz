@@ -91,9 +91,9 @@
     const data = flattenNigValues(values, type);
 
     // Fixed dimensions to prevent layout shifts
-    const width = 350;
-    const height = 250;
-    const margin = { top: 40, right: 20, bottom: 60, left: 50 };
+    const width = 380;
+    const height = 280;
+    const margin = { top: 50, right: 25, bottom: 90, left: 60 };
 
     if (!data.length) {
       const svg = d3.select(svgEl);
@@ -130,8 +130,8 @@
       .style('background', '#fff')
       .style('border', '1px solid #ddd')
       .style('border-radius', '12px')
-      .style('font-family', 'sans-serif')
-      .style('font-size', '13px');
+      .style('font-family', 'inherit')
+      .style('font-size', 'var(--text-chart-title)');
     svg.selectAll('*').remove();
 
     const g = svg.append('g').attr('transform', `translate(${margin.left},${margin.top})`);
@@ -173,25 +173,23 @@
     g.append('g')
       .attr('transform', `translate(0,${panelHeight})`)
       .call(d3.axisBottom(xAbs).tickValues(xAbsTickVals).tickFormat((d) => fmtPlain(d)))
-      .call((g) => g.selectAll('text').style('font-size', '10px').attr('dy', '0.9em'));
+      .call((g) => g.selectAll('text')
+        .style('font-size', 'var(--text-small)')
+        .attr('dy', '0.5em')
+        .attr('dx', '-0.5em')
+        .attr('transform', 'rotate(-45)')
+        .style('text-anchor', 'end'));
     g.append('g').call(d3.axisLeft(yCdf).ticks(5));
 
     g.append('text')
       .attr('x', panelWidth / 2)
-      .attr('y', panelHeight + 36)
+      .attr('y', panelHeight + 55)
       .attr('fill', '#333')
       .style('text-anchor', 'middle')
-      .style('font-size', '11px')
+      .style('font-size', 'var(--text-axis)')
       .text(useAbsoluteValues ? '|NIG| value' : 'Positive NIG values');
 
-    const titleStyle = { fill: '#333', 'font-size': '12px', 'font-weight': '600' };
-    g.append('text')
-      .attr('x', 0)
-      .attr('y', -22)
-      .attr('fill', titleStyle.fill)
-      .style('font-size', titleStyle['font-size'])
-      .style('font-weight', titleStyle['font-weight'])
-      .text(useAbsoluteValues ? 'ECDF + Mass-weighted ECDF of |NIG|' : 'ECDF + Mass-weighted ECDF of positive NIG');
+    const titleStyle = { fill: '#333', 'font-size': 'var(--text-label)', 'font-weight': '600' };
 
     // ECDF computation
     let ecdfData, ecdfN, ecdfTotalMass;
@@ -252,7 +250,7 @@
         .attr('x', legendX - 75)
         .attr('y', yRow - 2)
         .attr('fill', '#333')
-        .style('font-size','11px')
+        .style('font-size', 'var(--text-axis)')
         .text(item.text);
     });
 
@@ -269,7 +267,7 @@
         .attr('y', -18)
         .attr('fill', titleStyle.fill)
         .style('text-anchor', 'end')
-        .style('font-size', '11px')
+        .style('font-size', 'var(--text-axis)')
         .text(useAbsoluteValues 
           ? `Top ${(threshold * 100).toFixed(1)}% by |NIG|`
           : `Top ${(threshold * 100).toFixed(1)}% of NIG`);
@@ -291,9 +289,9 @@
         .lower();
       g.append('text')
         .attr('x', panelWidth)
-        .attr('y', panelHeight + 54)
+        .attr('y', panelHeight + 73)
         .attr('fill', 'crimson')
-        .style('font-size', '11px')
+        .style('font-size', 'var(--text-axis)')
         .style('font-weight', '600')
         .style('text-anchor', 'end')
         .text(useAbsoluteValues 
@@ -311,7 +309,7 @@
         .attr('y', -6)
         .attr('fill', titleStyle.fill)
         .style('text-anchor', 'end')
-        .style('font-size', '11px')
+        .style('font-size', 'var(--text-axis)')
         .text(useAbsoluteValues
           ? `Removes ~${(removedMass * 100).toFixed(1)}% of total |NIG| mass`
           : `Removes ~${(removedMass * 100).toFixed(1)}% of positive NIG mass`);

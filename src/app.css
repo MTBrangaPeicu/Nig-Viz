@@ -24,11 +24,20 @@
 }
 
 body {
-  @apple bg-base-200;
+  @apply bg-base-200;
 }
 
 :root {
   --scissors-cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='%23000000' stroke-width='2'%3E%3Ccircle cx='6' cy='6' r='3'/%3E%3Ccircle cx='6' cy='18' r='3'/%3E%3Cline x1='20' y1='4' x2='8.12' y2='15.88'/%3E%3Cline x1='14.47' y1='14.48' x2='20' y2='20'/%3E%3Cline x1='8.12' y1='8.12' x2='12' y2='12'/%3E%3C/svg%3E") 12 12, crosshair;
+
+  /* Consistent text sizing scale */
+  --text-page-title: 1.5rem;      /* 24px - page headings */
+  --text-section-title: 1.125rem; /* 18px - section headings */
+  --text-chart-title: 0.875rem;   /* 14px - chart/panel titles */
+  --text-label: 0.75rem;          /* 12px - labels, legends */
+  --text-axis: 0.6875rem;         /* 11px - axis ticks, annotations */
+  --text-small: 0.625rem;         /* 10px - small text, axis ticks */
+  --text-button: 0.75rem;         /* 12px - button text */
 }
 
 body.pruning-mode,
@@ -52,4 +61,34 @@ body.pruning-mode * {
 
 body {
   @apply bg-base-200;
+}
+
+/* ============== Marcelle Component Styling ============== */
+/* Ensure consistent text formatting for all marcelle components */
+.marcelle-component {
+  /* Match text sizes with rest of app */
+  font-size: var(--text-chart-title);
+}
+
+.marcelle-component .label-text {
+  font-size: var(--text-label);
+}
+
+.marcelle-component textarea,
+.marcelle-component input,
+.marcelle-component select,
+.marcelle-component .btn {
+  font-size: var(--text-chart-title);
+}
+
+/* Better-text textarea consistent styling */
+.marcelle-component textarea.textarea {
+  font-size: 0.8125rem;
+  line-height: 1.4;
+}
+
+/* Ensure subset buttons have consistent sizing */
+.marcelle-component .subset-buttons .btn {
+  font-size: var(--text-button);
+  font-weight: 500;
 }
