@@ -42,6 +42,9 @@ export class Architecture extends Component {
 		// Stream for previewing a pruning configuration on hover (from saved prunes list)
 		// Emits: { rules: [], targets: [], edges: [], thresholds: {} } | null
 		this.prunePreview$ = new BehaviorSubject(null);
+		// Stream for hover preview (node currently being hovered)
+		// Emits: { layer: number, type: 'ATTN'|'FFN'|'TOP', tokenType: string } | null
+		this.hover$ = new BehaviorSubject(null);
 		
 		// Subscribe to pruning state changes to recompute edges when thresholds change
 		// Skip the first value (initial state) to avoid unnecessary computation on startup
@@ -490,7 +493,8 @@ export class Architecture extends Component {
 				conditionalCursorEnabled$: this.conditionalCursorEnabled$,
 				conditionalNigTarget$: this.conditionalNigTarget$,
 				conditionalModeState$: this.conditionalModeState$,
-				prunePreview$: this.prunePreview$
+				prunePreview$: this.prunePreview$,
+				hover$: this.hover$
 			},
 		});
 		return () => unmount(app);

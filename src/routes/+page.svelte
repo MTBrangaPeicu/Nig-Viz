@@ -83,6 +83,29 @@
   let activeDistributionsTab = $state('charts'); // 'charts' or 'tokenResults'
   let igOutput = $state('');
   
+  // Bottom panel popup/maximize state
+  let bottomPanelCollapsed = $state(false);
+  let topPaneSize = $state(34);
+  let bottomPaneSize = $state(66);
+  
+  // Sync collapsed state when user manually drags the splitpane
+  $effect(() => {
+    // Consider collapsed if bottom pane is at or near minimum (header-only)
+    bottomPanelCollapsed = bottomPaneSize <= 10;
+  });
+  
+  function toggleBottomPanelCollapse() {
+    if (bottomPanelCollapsed) {
+      // Expand to default sizes
+      topPaneSize = 34;
+      bottomPaneSize = 66;
+    } else {
+      // Collapse to header-only (8%)
+      topPaneSize = 92;
+      bottomPaneSize = 8;
+    }
+  }
+  
   // Architecture zoom state
   let archZoom = $state(1);
   // Fixed architecture natural dimensions: SVG viewBox width=520, height=2038 (slider is outside transform)
@@ -112,6 +135,31 @@
     }
   });
 
+  // Update body class when conditional cursor mode changes
+  $effect(() => {
+    if (conditionalCursorActive) {
+      document.body.classList.add('conditional-mode');
+      console.log('[CONDITIONAL] Added conditional-mode class to body');
+    } else {
+      document.body.classList.remove('conditional-mode');
+      console.log('[CONDITIONAL] Removed conditional-mode class from body');
+    }
+  });
+
+  // Deactivate scissors mode when switching away from the relevant tabs
+  $effect(() => {
+    // When leaving the Pruning tab, deactivate pruning cursor
+    if (activeSidebarPanel !== 'pruning' && pruningCursorActive) {
+      pruningCursorActive = false;
+      console.log('[PAGE] Deactivated pruning cursor mode - switched away from Pruning tab');
+    }
+    // When leaving the Conditional NIG tab, deactivate conditional cursor
+    if (activeSidebarPanel !== 'conditional' && conditionalCursorActive) {
+      conditionalCursorActive = false;
+      console.log('[PAGE] Deactivated conditional cursor mode - switched away from Conditional tab');
+    }
+  });
+
   // Snip animation effect on click in pruning mode
   function createSnipEffect(x: number, y: number) {
     const el = document.createElement('div');
@@ -122,6 +170,20 @@
       <line x1="20" y1="4" x2="8.12" y2="15.88"/>
       <line x1="14.47" y1="14.48" x2="20" y2="20"/>
       <line x1="8.12" y1="8.12" x2="12" y2="12"/>
+    </svg>`;
+    el.style.left = `${x - 16}px`;
+    el.style.top = `${y - 16}px`;
+    document.body.appendChild(el);
+    setTimeout(() => el.remove(), 300);
+  }
+
+  // Focus animation effect on click in conditional NIG mode
+  function createFocusEffect(x: number, y: number) {
+    const el = document.createElement('div');
+    el.className = 'focus-effect';
+    el.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#3b82f6" stroke-width="2">
+      <circle cx="11" cy="11" r="8"/>
+      <line x1="21" y1="21" x2="16.65" y2="16.65"/>
     </svg>`;
     el.style.left = `${x - 16}px`;
     el.style.top = `${y - 16}px`;
@@ -143,6 +205,20 @@
     return () => document.removeEventListener('click', handleClick);
   });
 
+  // Global click handler for focus animation
+  $effect(() => {
+    if (!conditionalCursorActive) return;
+
+    const handleClick = (e: MouseEvent) => {
+      if (conditionalCursorActive) {
+        createFocusEffect(e.clientX, e.clientY);
+      }
+    };
+
+    document.addEventListener('click', handleClick);
+    return () => document.removeEventListener('click', handleClick);
+  });
+
   // Marcelle component instances (using $state so template bindings update after onMount)
   let archComponent: any = $state(null);
   let tableComponent: any = $state(null);
@@ -150,6 +226,51 @@
   let distributionLayerComponent: any = $state(null);
   let ecdfComponent: any = $state(null);
   let thresholdSliderComponent: any = $state(null);
+
+  // Selection panel state (attached to architecture header)
+  let selectionPanelVisible = $state(false);
+  let selectionAssistEnabled = $state(true); // Toggle to enable/disable selection assist popover
+  let currentArchSelection: { source: any; target: any } = $state({ source: null, target: null });
+  let currentArchHover: { layer: number; type: string; tokenType: string } | null = $state(null);
+
+  // Detect inverted selection mode: only when hovering same-layer ATTN after clicking FFN
+  // In this case, FFN is semantically the TARGET, ATTN is the SOURCE (attention flows down to FFN)
+  let isHoverInverted = $derived.by(() => {
+    if (!currentArchHover || !currentArchSelection?.source || currentArchSelection?.target) return false;
+    const src = currentArchSelection.source;
+    const hover = currentArchHover;
+    return src.type === 'FFN' && hover.type === 'ATTN' && hover.layer === src.layer;
+  });
+
+  // Simple check if hover is a valid target (matches yellow highlighting logic in architecture.view.svelte)
+  let isHoverValidTarget = $derived.by(() => {
+    if (!currentArchHover || !currentArchSelection?.source || currentArchSelection?.target) return false;
+    const src = currentArchSelection.source;
+    const hover = currentArchHover;
+    
+    // Same node = would clear, not valid target
+    if (src.layer === hover.layer && src.type === hover.type && src.tokenType === hover.tokenType) return false;
+    
+    return (
+      (src.type === 'ATTN' && hover.type === 'FFN' && hover.layer === src.layer) ||
+      (src.type === 'FFN' && hover.type === 'ATTN' && hover.layer === src.layer + 1 && hover.tokenType === src.tokenType) ||
+      (src.type === 'FFN' && hover.type === 'ATTN' && hover.layer === src.layer) ||
+      (src.type === 'FFN' && src.layer === 11 && hover.type === 'TOP')
+    );
+  });
+
+  // Check if hover is a normal (non-inverted) valid target: ATTN→FFN, FFN→next-ATTN, FFN→TOP
+  let isHoverNormal = $derived.by(() => {
+    if (!isHoverValidTarget || !currentArchHover || !currentArchSelection?.source) return false;
+    const src = currentArchSelection.source;
+    const hover = currentArchHover;
+    // Normal cases: ATTN→FFN (same layer), FFN→ATTN (next layer), FFN→TOP
+    return (
+      (src.type === 'ATTN' && hover.type === 'FFN' && hover.layer === src.layer) ||
+      (src.type === 'FFN' && hover.type === 'ATTN' && hover.layer === src.layer + 1) ||
+      (src.type === 'FFN' && hover.type === 'TOP')
+    );
+  });
 
   // Input panel components (shared across pages for state persistence)
   const sharedInputs = getSharedInputComponents();
@@ -339,10 +460,13 @@
                 '[PAGE] Conditional NIG target from architecture:',
                 target,
               );
+              // Architecture provides tokenType as a single value (used for both source and target)
               conditionalNigPanel.setTarget(
                 target.layerIdx,
                 target.neuronIdx,
                 target.neuronType,
+                target.tokenType,
+                target.tokenType,
               );
             }
           },
@@ -362,10 +486,13 @@
               conditionalNigPanel.setTarget
             ) {
               console.log('[PAGE] Conditional NIG target from table:', target);
+              // Table provides separate sourceTokenType and targetTokenType
               conditionalNigPanel.setTarget(
                 target.layerIdx,
                 target.neuronIdx,
                 target.neuronType,
+                target.sourceTokenType,
+                target.targetTokenType,
               );
             }
           },
@@ -421,6 +548,12 @@
     // Subscribe to architecture selection changes to update table
     const archSelectionSub = archComponent.$selection.subscribe((sel: any) => {
       console.log('[Architecture] Selection changed:', sel);
+      
+      // Update selection panel state
+      currentArchSelection = sel || { source: null, target: null };
+      if (currentArchSelection.source && selectionAssistEnabled) {
+        selectionPanelVisible = true;
+      }
 
       // Only update table if we have NIG data loaded
       const subsetB = archComponent.subsetBData$.getValue();
@@ -656,6 +789,11 @@
       });
     });
 
+    // Subscribe to hover events from architecture for preview
+    const archHoverSub = archComponent.hover$.subscribe((hovered: any) => {
+      currentArchHover = hovered;
+    });
+
     // Subscribe to table selection requests (from index.js lines 164-169)
     const tableSelectionSub = tableComponent.selectionRequest$.subscribe(
       (selection: any) => {
@@ -749,6 +887,7 @@
     return () => {
       nigDataSub.unsubscribe();
       archSelectionSub.unsubscribe();
+      archHoverSub.unsubscribe();
       tableSelectionSub.unsubscribe();
       thresholdSub.unsubscribe();
       globalCutoffSub.unsubscribe();
@@ -818,6 +957,13 @@
           targetNeuronType: null,
         });
       }
+    }
+
+    // Update table conditional mode state
+    if (tableComponent && tableComponent.conditionalModeState$) {
+      tableComponent.conditionalModeState$.next({
+        isConditional: doc.__isConditional && doc.__conditionalTarget,
+      });
     }
 
     // Compute global extent (from index.js lines 542-580)
@@ -932,6 +1078,11 @@
     // Update architecture (from index.js lines 636-637)
     archComponent.updateEdges(nig);
     console.log('[MODEL STREAM] Edges recomputed for doc id=', doc._id);
+    
+    // Show selection panel when NIGs are calculated (if assist enabled)
+    if (selectionAssistEnabled) {
+      selectionPanelVisible = true;
+    }
 
     // Force table to update with new data by re-emitting current selection
     // This ensures table reflects the new NIG data even if selection hasn't changed
@@ -1114,6 +1265,7 @@
               visible={true}
               {absoluteValuesToggle}
               {architectureColorsToggle}
+              bind:selectionAssistEnabled
             />
           {:else if activeSidebarPanel === 'pruning'}
             <PruningPanel
@@ -1154,15 +1306,15 @@
           <div class="flex-1 min-h-0 overflow-hidden">
             <Splitpanes theme="modern-theme" horizontal>
               <!-- TOP SECTION: Architecture and Table side-by-side -->
-              <Pane size={60} minSize={5}>
+              <Pane bind:size={topPaneSize} minSize={6}>
                 <!-- Inner horizontal = Left/Right split for Arch | Table -->
                 <Splitpanes theme="modern-theme" class="h-full">
                   <!-- Architecture (Left) -->
                   <Pane size={65} minSize={20}>
-                    <div class="h-full w-full flex flex-col overflow-hidden bg-base-100">
+                    <div class="h-full w-full flex flex-col overflow-hidden bg-base-100 relative">
                       <!-- Header -->
                       <div
-                        class="px-4 py-2 border-b border-base-300 flex items-center justify-between flex-shrink-0"
+                        class="px-4 h-10 border-b border-base-300 flex items-center justify-between flex-shrink-0"
                       >
                         <h2 class="text-sm font-semibold text-base-content/70">
                           Architecture
@@ -1194,7 +1346,7 @@
                           </div>
                           <span class="tooltip-wrapper">
                             <span class="tooltip-icon">?</span>
-                            <span class="tooltip-text">Neural network layer structure showing attention heads and NIG attribution flow.</span>
+                            <span class="tooltip-text">Neural network layer structure showing attention heads and NIG attribution flow. Use threshold to affect edges.</span>
                           </span>
                         </div>
                       </div>
@@ -1215,8 +1367,9 @@
                           >{label}</span>
                         {/each}
                       </div>
+                      
                       <!-- Scrollable area fills remaining space -->
-                      <div class="flex-1 min-h-0 overflow-auto">
+                      <div class="flex-1 min-h-0 overflow-auto relative">
                         <!-- Wrapper with scaled dimensions for proper scrollbar sizing -->
                         <div style="width: {ARCH_SVG_WIDTH * archZoom}px; height: {ARCH_SVG_HEIGHT * archZoom}px;">
                           <!-- Architecture content - scaled -->
@@ -1228,38 +1381,175 @@
                           </div>
                         </div>
                       </div>
+                      
+                      <!-- Selection Panel Popover (fixed position within arch pane) -->
+                      {#if selectionPanelVisible && selectionAssistEnabled}
+                        <div class="selection-popover">
+                          <div class="selection-popover-header">
+                            <span class="text-xs font-semibold text-base-content/70 uppercase tracking-wide">Selection</span>
+                            <button 
+                              class="selection-popover-close"
+                              onclick={() => { selectionPanelVisible = false; }}
+                              title="Close"
+                            >
+                              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M18 6L6 18M6 6l12 12"/>
+                              </svg>
+                            </button>
+                          </div>
+                          
+                          <div class="selection-popover-content">
+                            {#if tableSummary}
+                              <!-- Complete selection: show table summary directly -->
+                              <div class="selection-popover-summary">
+                                {tableSummary}
+                              </div>
+                              <p class="selection-popover-success">See table →</p>
+                            {:else if currentArchSelection?.source}
+                              <!-- Fixed layout: Source always top, Target always bottom -->
+                              <!-- Green block position changes based on hover state -->
+                              
+                              <!-- SOURCE (top) -->
+                              <div class="selection-popover-box"
+                                class:active={!isHoverInverted}
+                                class:preview={isHoverInverted}
+                              >
+                                <div class="selection-popover-label">
+                                  <span class="selection-popover-number"
+                                    class:active={!isHoverInverted}
+                                    class:preview={isHoverInverted}
+                                  >1</span>
+                                  <span>Source</span>
+                                </div>
+                                {#if isHoverInverted && currentArchHover}
+                                  <!-- Inverted: ATTN is the source (from hover) -->
+                                  <div class="selection-popover-info">
+                                    <span class="selection-popover-type attn">ATTN</span>
+                                    <span class="selection-popover-detail">L{currentArchHover?.layer}</span>
+                                    <span class="selection-popover-token">{currentArchHover?.tokenType}</span>
+                                  </div>
+                                {:else if isHoverNormal}
+                                  <!-- Normal: clicked node is the source -->
+                                  <div class="selection-popover-info">
+                                    <span class="selection-popover-type"
+                                      class:attn={currentArchSelection.source.type === 'ATTN'}
+                                      class:ffn={currentArchSelection.source.type === 'FFN'}
+                                    >{currentArchSelection.source.type}</span>
+                                    <span class="selection-popover-detail">L{currentArchSelection.source.layer}</span>
+                                    <span class="selection-popover-token">{currentArchSelection.source.tokenType}</span>
+                                  </div>
+                                {:else}
+                                  <!-- Default: clicked node shown as source -->
+                                  <div class="selection-popover-info">
+                                    <span class="selection-popover-type"
+                                      class:attn={currentArchSelection.source.type === 'ATTN'}
+                                      class:ffn={currentArchSelection.source.type === 'FFN'}
+                                    >{currentArchSelection.source.type}</span>
+                                    <span class="selection-popover-detail">L{currentArchSelection.source.layer}</span>
+                                    <span class="selection-popover-token">{currentArchSelection.source.tokenType}</span>
+                                  </div>
+                                {/if}
+                              </div>
+                              
+                              <!-- Arrow -->
+                              <div class="selection-popover-arrow">
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                  <path d="M12 5v14M19 12l-7 7-7-7"/>
+                                </svg>
+                              </div>
+                              
+                              <!-- TARGET (bottom) -->
+                              <div class="selection-popover-box"
+                                class:active={isHoverInverted}
+                                class:preview={isHoverNormal}
+                                class:waiting={!isHoverInverted && !isHoverNormal}
+                              >
+                                <div class="selection-popover-label">
+                                  <span class="selection-popover-number"
+                                    class:active={isHoverInverted}
+                                    class:preview={isHoverNormal}
+                                    class:waiting={!isHoverInverted && !isHoverNormal}
+                                  >2</span>
+                                  <span>Target</span>
+                                </div>
+                                {#if isHoverInverted}
+                                  <!-- Inverted: FFN (clicked node) is the target -->
+                                  <div class="selection-popover-info">
+                                    <span class="selection-popover-type ffn">FFN</span>
+                                    <span class="selection-popover-detail">L{currentArchSelection.source.layer}</span>
+                                    <span class="selection-popover-token">{currentArchSelection.source.tokenType}</span>
+                                  </div>
+                                {:else if isHoverNormal && currentArchHover}
+                                  <!-- Normal: hover is the target -->
+                                  <div class="selection-popover-info">
+                                    {#if currentArchHover?.type === 'TOP'}
+                                      <span class="selection-popover-type top">OUT</span>
+                                    {:else}
+                                      <span class="selection-popover-type"
+                                        class:attn={currentArchHover?.type === 'ATTN'}
+                                        class:ffn={currentArchHover?.type === 'FFN'}
+                                      >{currentArchHover?.type}</span>
+                                      <span class="selection-popover-detail">L{currentArchHover?.layer}</span>
+                                    {/if}
+                                    <span class="selection-popover-token">{currentArchHover?.tokenType}</span>
+                                  </div>
+                                {:else}
+                                  <span class="selection-popover-placeholder">Hover yellow node</span>
+                                {/if}
+                              </div>
+                            {:else}
+                              <!-- No selection yet -->
+                              <div class="selection-popover-box">
+                                <span class="selection-popover-placeholder">Click any node to start</span>
+                              </div>
+                            {/if}
+                            
+                            {#if currentArchSelection?.source}
+                              <button 
+                                class="selection-popover-clear"
+                                onclick={() => { archComponent?.$selection.next({ source: null, target: null }); selectionPanelVisible = false; }}
+                              >
+                                Clear
+                              </button>
+                            {/if}
+                          </div>
+                        </div>
+                      {/if}
                     </div>
                   </Pane>
 
                   <!-- Table (Right) -->
                   <Pane size={35} minSize={10}>
                     <div
-                      class="h-full w-full flex flex-col bg-base-100 border-l border-base-300 overflow-auto"
+                      class="h-full w-full flex flex-col bg-base-100 border-l border-base-300"
                     >
                       <div
-                        class="px-4 py-2 border-b border-base-300 flex-shrink-0 flex items-center justify-between"
+                        class="px-4 h-10 border-b border-base-300 flex-shrink-0 flex items-center justify-between"
                       >
                         <h2 class="text-sm font-semibold text-base-content/70">
                           NIG Table{#if tableSummary} <span class="font-normal text-base-content/50">({tableSummary})</span>{/if}
                         </h2>
                         <span class="tooltip-wrapper">
                           <span class="tooltip-icon">?</span>
-                          <span class="tooltip-text">Tabular view of NIG values per layer and head. Click to select for pruning analysis.</span>
+                          <span class="tooltip-text">Tabular view of NIG values per layer. Provides aggregated summaries of both neurons and heads.</span>
                         </span>
                       </div>
-                      <div
-                        class="min-w-0"
-                        bind:this={tableContainer}
-                      ></div>
+                      <!-- Table container fills remaining space -->
+                      <div class="flex-1 min-h-0">
+                        <div
+                          class="h-full w-full"
+                          bind:this={tableContainer}
+                        ></div>
+                      </div>
                     </div>
                   </Pane>
                 </Splitpanes>
               </Pane>
 
               <!-- BOTTOM SECTION: Three visualizations -->
-              <Pane size={40} minSize={5}>
+              <Pane bind:size={bottomPaneSize} minSize={8}>
                 <div
-                  class="h-full w-full flex flex-col bg-base-100 border-t border-base-300 overflow-hidden"
+                  class="h-full w-full flex flex-col bg-base-100 border-t border-base-300"
                 >
                   <div class="px-4 py-2 border-b border-base-300 flex-shrink-0 flex items-center justify-between">
                     <div class="flex items-center">
@@ -1276,11 +1566,29 @@
                       >
                         Token Results
                       </button>
+                      <!-- Collapse/Expand button next to tabs -->
+                      <button
+                        class="btn btn-xs btn-ghost px-1 ml-2"
+                        onclick={toggleBottomPanelCollapse}
+                        title={bottomPanelCollapsed ? 'Expand panel' : 'Collapse panel'}
+                      >
+                        {#if bottomPanelCollapsed}
+                          <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 15l7-7 7 7" />
+                          </svg>
+                        {:else}
+                          <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+                          </svg>
+                        {/if}
+                      </button>
                     </div>
-                    <span class="tooltip-wrapper">
-                      <span class="tooltip-icon">?</span>
-                      <span class="tooltip-text">{activeDistributionsTab === 'charts' ? 'Statistical distributions and cumulative density functions of NIG attribution values.' : 'Token-level integrated gradients visualization showing attribution per token.'}</span>
-                    </span>
+                    <div class="flex items-center gap-2">
+                      <span class="tooltip-wrapper">
+                        <span class="tooltip-icon">?</span>
+                        <span class="tooltip-text">{activeDistributionsTab === 'charts' ? 'Statistical distributions and cumulative density functions of NIG attribution values.' : 'Token-level integrated gradients visualization showing attribution per token.'}</span>
+                      </span>
+                    </div>
                   </div>
                   
                   <!-- Tab Content -->
@@ -1320,22 +1628,21 @@
                       </div>
                     {/if}
                   </div>
-
-                  <!-- Output Console at bottom (always visible, never pushed off screen) -->
-                  <div class="flex-shrink-0 border-t border-base-300">
-                    <OutputConsole
-                      statusStream={nigConnection.nigStatus$}
-                      conditionalStatusStream={nigConnection.conditionalNigStatus$}
-                      forwardPassStatusStream={nigConnection.forwardPassStatus$}
-                      prunedForwardPassStatusStream={nigConnection.prunedForwardPassStatus$}
-                      igStatusStream={nigConnection.igStatus$}
-                      connection={nigConnection}
-                      pruningState$={archComponent?.pruningState$}
-                    />
-                  </div>
                 </div>
               </Pane>
             </Splitpanes>
+          </div>
+          <!-- Output Console - fixed at bottom, outside Splitpanes -->
+          <div class="flex-shrink-0 border-t border-base-300">
+            <OutputConsole
+              statusStream={nigConnection.nigStatus$}
+              conditionalStatusStream={nigConnection.conditionalNigStatus$}
+              forwardPassStatusStream={nigConnection.forwardPassStatus$}
+              prunedForwardPassStatusStream={nigConnection.prunedForwardPassStatus$}
+              igStatusStream={nigConnection.igStatus$}
+              connection={nigConnection}
+              pruningState$={archComponent?.pruningState$}
+            />
           </div>
         </div>
       </Pane>
@@ -1405,7 +1712,7 @@
     font-weight: 400;
     border-radius: 0.375rem;
     width: 220px;
-    z-index: 1000;
+    z-index: 99999;
     box-shadow: 0 4px 12px rgba(0,0,0,0.3);
     line-height: 1.5;
     transition: opacity 0.15s ease, visibility 0.15s ease;
@@ -1414,5 +1721,222 @@
   .tooltip-wrapper:hover .tooltip-text {
     visibility: visible;
     opacity: 1;
+  }
+  
+  /* Selection Popover Styles */
+  .selection-popover {
+    position: absolute;
+    bottom: 16px;
+    right: 16px;
+    width: 160px;
+    background: linear-gradient(to bottom, #ffffff, #f8fafc);
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12), 0 2px 4px rgba(0, 0, 0, 0.08);
+    z-index: 100;
+    overflow: hidden;
+  }
+  
+  .selection-popover-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 10px;
+    background: #f1f5f9;
+    border-bottom: 1px solid #e2e8f0;
+  }
+  
+  .selection-popover-close {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    background: transparent;
+    border: none;
+    border-radius: 4px;
+    color: #94a3b8;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+  
+  .selection-popover-close:hover {
+    background: #e2e8f0;
+    color: #475569;
+  }
+  
+  .selection-popover-content {
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  
+  .selection-popover-summary {
+    font-size: 12px;
+    font-weight: 600;
+    color: #22C55E;
+    text-align: center;
+    padding: 8px;
+    background: rgba(34, 197, 94, 0.1);
+    border-radius: 6px;
+    border: 1px solid rgba(34, 197, 94, 0.3);
+  }
+  
+  .selection-popover-box {
+    background: #fff;
+    border: 2px solid #e2e8f0;
+    border-radius: 6px;
+    padding: 8px;
+    transition: all 0.2s ease;
+  }
+  
+  .selection-popover-box.active {
+    border-color: #22C55E;
+    box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.15);
+  }
+  
+  .selection-popover-box.preview {
+    border-color: #F59E0B;
+    border-style: dashed;
+    box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.15);
+    background: #fffbeb;
+  }
+  
+  .selection-popover-box.waiting {
+    border-color: #F59E0B;
+    box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.15);
+    animation: popoverPulse 2s ease-in-out infinite;
+  }
+  
+  @keyframes popoverPulse {
+    0%, 100% { box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.15); }
+    50% { box-shadow: 0 0 0 4px rgba(245, 158, 11, 0.25); }
+  }
+  
+  .selection-popover-label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 10px;
+    font-weight: 500;
+    color: #64748b;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+    margin-bottom: 4px;
+  }
+  
+  .selection-popover-number {
+    width: 16px;
+    height: 16px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #e2e8f0;
+    color: #475569;
+    border-radius: 50%;
+    font-size: 10px;
+    font-weight: 600;
+  }
+  
+  .selection-popover-number.active {
+    background: #22C55E;
+    color: white;
+  }
+  
+  .selection-popover-number.preview {
+    background: #F59E0B;
+    color: white;
+    border: 1px dashed #fff;
+  }
+  
+  .selection-popover-number.waiting {
+    background: #F59E0B;
+    color: white;
+  }
+  
+  .selection-popover-info {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-wrap: wrap;
+  }
+  
+  .selection-popover-type {
+    display: inline-flex;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+  }
+  
+  .selection-popover-type.attn {
+    background: #dbeafe;
+    color: #1d4ed8;
+  }
+  
+  .selection-popover-type.ffn {
+    background: #fef3c7;
+    color: #b45309;
+  }
+  
+  .selection-popover-type.top {
+    background: #f3e8ff;
+    color: #7c3aed;
+  }
+  
+  .selection-popover-detail {
+    font-size: 11px;
+    font-weight: 500;
+    color: #475569;
+  }
+  
+  .selection-popover-token {
+    background: #f1f5f9;
+    padding: 1px 4px;
+    border-radius: 3px;
+    font-family: monospace;
+    font-size: 10px;
+    color: #475569;
+  }
+  
+  .selection-popover-placeholder {
+    color: #94a3b8;
+    font-size: 11px;
+    font-style: italic;
+  }
+  
+  .selection-popover-arrow {
+    display: flex;
+    justify-content: center;
+    color: #cbd5e1;
+  }
+  
+  .selection-popover-success {
+    margin: 0;
+    font-size: 10px;
+    color: #22C55E;
+    font-weight: 500;
+    text-align: center;
+  }
+  
+  .selection-popover-clear {
+    width: 100%;
+    padding: 6px;
+    background: #fff;
+    border: 1px solid #e2e8f0;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 500;
+    color: #64748b;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+  
+  .selection-popover-clear:hover {
+    background: #fef2f2;
+    border-color: #fecaca;
+    color: #dc2626;
   }
 </style>

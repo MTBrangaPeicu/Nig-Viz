@@ -20,8 +20,11 @@
 	export let conditionalNigTarget$ = null;
 	export let conditionalModeState$ = null;
 	export let prunePreview$ = null; // For hover preview of saved prunes
+	export let hover$ = null; // For emitting hovered node info
 	//export let error$;
 
+	// Track currently hovered node
+	let currentHover = null;
 
 	// Adjustable vertical shift for everything below the text+bar
 	const yShift = 48;
@@ -30,6 +33,7 @@
 
 	let svg;
 	let edgesGroup;
+	let pruningOverlaysGroup; // group for striped pruning overlays
 	let topBarEl; // reference to the clickable top bar
 	let errorSub; // Declare errorSub variable
 	let nodePruningState = { enabled: false, rules: [], targets: [], thresholds: {} };
@@ -428,23 +432,24 @@
 		);
 	}
 
+	// Function to check if a node is pruned (via prunedNodes Set or pruning rules)
+	// Returns false in conditional mode to hide original pruning visualizations
+	function isNodePruned(layerIndex, nodeType, tokenType) {
+		// Don't show pruning in conditional mode - we want a clean view of conditional NIG values
+		if (conditionalModeState.isConditional) return false;
+		
+		const nodeId = `L${layerIndex}_${nodeType}_${tokenType}`;
+		return prunedNodes.has(nodeId) || shouldNodeBeRed(layerIndex, nodeType, tokenType);
+	}
+
 	// Function to get color for a node based on its max value
 	// Uses EXACT same color scale as heatmaps and color scale legend
+	// Note: Pruned nodes no longer use darkred color - they use striped overlays instead
 	function getNodeColor(layerIndex, nodeType, tokenType) {
 		const tokenTypes = ['cls', 'qry', 'sep1', 'doc', 'sep2'];
 		const nodeId = `L${layerIndex}_${nodeType}_${tokenType}`;
 		
-		// Priority 1: Manually pruned nodes via prunedNodes Set
-		if (prunedNodes.has(nodeId)) {
-			return 'darkred';
-		}
-		
-		// Priority 2: Interactive pruning rules (from pruningState$.rules)
-		if (shouldNodeBeRed(layerIndex, nodeType, tokenType)) {
-			return 'darkred';
-		}
-		
-		// Priority 3: Color by value if enabled and data available
+		// Color by value if enabled and data available
 		if (colorNodesEnabled && nodeColorData && nodeColorData.nodeMaxValues) {
 			const nodeKey = `L${layerIndex}_${nodeType}_${tokenType}`;
 			const value = nodeColorData.nodeMaxValues[nodeKey];
@@ -462,8 +467,9 @@
 				};
 				
 				// EXACT same color logic as heatmaps (LOGARITHMIC scale for NIG)
+				// When minV=0 (absolute values mode), still use diverging scale centered at 0
 				if (minV < 0 && maxV > 0) {
-					// Diverging with symlog - SAME as heatmap
+					// Diverging with symlog - true diverging data
 					const logMaxAbs = symlog(maxAbs);
 					const logVal = symlog(value);
 					const baseColor = d3.scaleDiverging(d3.interpolateRdBu)
@@ -474,8 +480,23 @@
 					rgb.g = Math.pow(rgb.g / 255, 0.8) * 255;
 					rgb.b = Math.pow(rgb.b / 255, 0.8) * 255;
 					return rgb.toString();
+				} else if (minV >= 0) {
+					// All positive (absolute values mode) - use diverging scale from 0 to max
+					// This keeps colors consistent with non-absolute mode
+					const logMax = symlog(maxV);
+					const logVal = symlog(value);
+					// Map [0, logMax] to [0.5, 0] in RdBu (center=white, low=blue, high=red)
+					// Using half of the diverging scale (blue side: 0.5 to 1)
+					const baseColor = d3.scaleDiverging(d3.interpolateRdBu)
+						.domain([logMax, 0, -logMax])
+						.clamp(true)(logVal);
+					const rgb = d3.color(baseColor).rgb();
+					rgb.r = Math.pow(rgb.r / 255, 0.8) * 255;
+					rgb.g = Math.pow(rgb.g / 255, 0.8) * 255;
+					rgb.b = Math.pow(rgb.b / 255, 0.8) * 255;
+					return rgb.toString();
 				} else {
-					// Sequential with log - SAME as heatmap
+					// All negative - rare case
 					const logMin = symlog(minV);
 					const logMax = symlog(maxV);
 					const logVal = symlog(value);
@@ -498,6 +519,7 @@
 	// Function to update node colors based on pruning state and color mode
 	function updateNodeColors() {
 		const tokenTypes = ['cls', 'qry', 'sep1', 'doc', 'sep2'];
+		const numLayers = 24;
 		
 		// Update circles (ATTN nodes)
 		svg.selectAll(".attn-circle")
@@ -506,10 +528,6 @@
 				const tokenIndex = parseInt(this.getAttribute('data-token'));
 				const tokenType = tokenTypes[tokenIndex];
 				return getNodeColor(layerIndex, 'ATTN', tokenType);
-			})
-			.attr("fill-opacity", function() {
-				const nodeId = this.getAttribute('data-node-id');
-				return prunedNodes.has(nodeId) ? 0.3 : 1.0;
 			})
 			// Reset stroke unless in selection highlight mode
 			.each(function() {
@@ -528,10 +546,6 @@
 				const tokenType = tokenTypes[tokenIndex];
 				return getNodeColor(layerIndex, 'FFN', tokenType);
 			})
-			.attr("fill-opacity", function() {
-				const nodeId = this.getAttribute('data-node-id');
-				return prunedNodes.has(nodeId) ? 0.3 : 1.0;
-			})
 			// Reset stroke unless in selection highlight mode
 			.each(function() {
 				const el = d3.select(this);
@@ -540,6 +554,104 @@
 					el.attr('stroke', 'white').attr('stroke-width', 3).style('filter', null);
 				}
 			});
+
+		// Update pruning overlays (striped bands above pruned nodes)
+		updatePruningOverlays();
+	}
+
+	// Function to update striped overlays across pruned nodes
+	function updatePruningOverlays() {
+		if (!pruningOverlaysGroup) return;
+		
+		const tokenTypes = ['cls', 'qry', 'sep1', 'doc', 'sep2'];
+		const numLayers = 12; // 12 transformer layers (each has ATTN + FFN)
+		// Square size that stretches from node center to midpoint (half gridSize in each direction = gridSize total)
+		const overlaySize = gridSize;
+		
+		// Clear existing overlays
+		pruningOverlaysGroup.selectAll('.pruning-overlay').remove();
+		
+		// Track which layers have all tokens pruned (for layer-wide stripe)
+		const layerPruned = {};
+		
+		// Check each node and add overlay if pruned
+		for (let layerIdx = 0; layerIdx < numLayers; layerIdx++) {
+			for (const nodeType of ['ATTN', 'FFN']) {
+				let allPrunedInRow = true;
+				
+				for (let tokenIdx = 0; tokenIdx < tokenTypes.length; tokenIdx++) {
+					const tokenType = tokenTypes[tokenIdx];
+					const isPruned = isNodePruned(layerIdx, nodeType, tokenType);
+					
+					if (!isPruned) {
+						allPrunedInRow = false;
+					}
+				}
+				
+				// Store if whole row is pruned
+				const rowKey = `${layerIdx}_${nodeType}`;
+				layerPruned[rowKey] = allPrunedInRow;
+			}
+		}
+		
+		// Now draw overlays
+		for (let layerIdx = 0; layerIdx < numLayers; layerIdx++) {
+			for (const nodeType of ['ATTN', 'FFN']) {
+				const rowKey = `${layerIdx}_${nodeType}`;
+				
+				// Calculate visual row index (layers are displayed from 23 down to 0)
+				// ATTN is even (layer*2), FFN is odd (layer*2+1)
+				const visualLayerNum = nodeType === 'ATTN' ? layerIdx * 2 : layerIdx * 2 + 1;
+				const visualRowIdx = (numLayers * 2 - 1) - visualLayerNum;
+				
+				// Y position of the node center
+				const nodeCenterY = margin.top + visualRowIdx * gridSize + gridSize / 2 + yShift;
+				
+				// Position square centered on the node
+				const overlayY = nodeCenterY - overlaySize / 2;
+				
+				if (layerPruned[rowKey]) {
+					// Whole layer is pruned - draw squares centered on each node
+					for (let tokenIdx = 0; tokenIdx < tokenTypes.length; tokenIdx++) {
+						const nodeCenterX = margin.left + tokenIdx * gridSize + gridSize / 2;
+						const overlayX = nodeCenterX - overlaySize / 2;
+						
+						pruningOverlaysGroup.append('rect')
+							.attr('class', 'pruning-overlay pruning-overlay-layer')
+							.attr('x', overlayX)
+							.attr('y', overlayY)
+							.attr('width', overlaySize)
+							.attr('height', overlaySize)
+							.attr('fill', 'url(#pruned-stripes)')
+							.attr('rx', 4)
+							.attr('ry', 4)
+							.style('pointer-events', 'none');
+					}
+				} else {
+					// Check individual nodes - draw square overlay centered on each pruned node
+					for (let tokenIdx = 0; tokenIdx < tokenTypes.length; tokenIdx++) {
+						const tokenType = tokenTypes[tokenIdx];
+						const isPruned = isNodePruned(layerIdx, nodeType, tokenType);
+						
+						if (isPruned) {
+							const nodeCenterX = margin.left + tokenIdx * gridSize + gridSize / 2;
+							const overlayX = nodeCenterX - overlaySize / 2;
+							
+							pruningOverlaysGroup.append('rect')
+								.attr('class', 'pruning-overlay pruning-overlay-node')
+								.attr('x', overlayX)
+								.attr('y', overlayY)
+								.attr('width', overlaySize)
+								.attr('height', overlaySize)
+								.attr('fill', 'url(#pruned-stripes)')
+								.attr('rx', 4)
+								.attr('ry', 4)
+								.style('pointer-events', 'none');
+						}
+					}
+				}
+			}
+		}
 	}
 
 	// Utility to map tokenType label to index
@@ -727,6 +839,11 @@
 				}
 			}
 		}
+
+		// Ensure pruning overlays stay on top after selection highlighting
+		if (pruningOverlaysGroup) {
+			pruningOverlaysGroup.raise();
+		}
 	}
 
 	// Removed scroll adjustments: no auto-scrolling or position preservation
@@ -734,6 +851,13 @@
 	// Handle click events for FFN and ATTN layers
 	function handleClick(layer, type, tokenType) {
 		console.log(`Clicked - Layer: ${layer}, Type: ${type}, Token Type: ${tokenType}`);
+		
+		// Block selection if NIG data hasn't been loaded yet
+		const edges = edges$.getValue ? edges$.getValue() : [];
+		if (!edges || edges.length === 0) {
+			console.log('[Architecture] Selection blocked - NIG data not loaded yet');
+			return;
+		}
 		
 		// Handle conditional NIG cursor mode
 		if (conditionalCursorEnabled && conditionalNigTarget$ && type !== 'TOP') {
@@ -769,21 +893,10 @@
 			return false;
 		}
 
-		function flashInvalid(t) {
-			const tokenIdx = tokenTypeToIndex(t.tokenType);
-			if (tokenIdx === -1) return;
-			const sel = svg.selectAll(t.type === 'ATTN' ? '.attn-circle' : '.ffn-square')
-				.filter(function() {
-					return parseInt(this.getAttribute('data-layer')) === t.layer &&
-						parseInt(this.getAttribute('data-token')) === tokenIdx;
-				});
-			sel.classed('invalid-pulse', true);
-			setTimeout(() => sel.classed('invalid-pulse', false), 1000);
-		}
-
+		// TOP bar cannot be a first selection (source)
 		if (!cur.source) {
-			// First click cannot be TOP bar; show invalid on bar instead
 			if (type === 'TOP') {
+				// Flash invalid on bar - TOP can only be a target
 				if (topBarEl) {
 					topBarEl.classed('invalid-pulse', true);
 					setTimeout(() => topBarEl.classed('invalid-pulse', false), 1000);
@@ -793,37 +906,40 @@
 			selection$.next({ source: node, target: null });
 			return;
 		}
+		
+		// Source is already selected, handling second click
 		if (!cur.target) {
-			// If clicking the same node, clear
+			// If clicking the same node, clear the selection
 			if (cur.source.layer === node.layer && cur.source.type === node.type && cur.source.tokenType === node.tokenType) {
 				selection$.next({ source: null, target: null });
+				return;
+			}
+			
+			// Check if this is a valid target for the current source
+			if (isValidSecondClick(cur.source, node)) {
+				// Valid target - complete the selection
+				selection$.next({ source: cur.source, target: node });
 			} else {
-				if (isValidSecondClick(cur.source, node)) {
-					selection$.next({ source: cur.source, target: node });
-				} else {
-					// Invalid second click: flash appropriate element and clear selection
-					if (node.type === 'TOP') {
-						if (topBarEl) {
-							topBarEl.classed('invalid-pulse', true);
-							setTimeout(() => topBarEl.classed('invalid-pulse', false), 1000);
-						}
-					} else {
-						flashInvalid(node);
-					}
+				// Invalid target - CHANGE the source to this node instead of refusing
+				// This allows exploration without repeatedly getting rejected
+				if (node.type === 'TOP') {
+					// TOP can't be a source, so clear selection instead
 					selection$.next({ source: null, target: null });
+				} else {
+					// Make the clicked node the new source
+					selection$.next({ source: node, target: null });
 				}
 			}
 			return;
 		}
-		// If both set, start a new selection; TOP cannot be a first selection
+		
+		// Both source and target are set - start a new selection
 		if (type === 'TOP') {
-			if (topBarEl) {
-				topBarEl.classed('invalid-pulse', true);
-				setTimeout(() => topBarEl.classed('invalid-pulse', false), 1000);
-			}
+			// TOP cannot be a first selection, clear everything
 			selection$.next({ source: null, target: null });
 			return;
 		}
+		// Start fresh selection with this node as source
 		selection$.next({ source: node, target: null });
 	}
 
@@ -857,18 +973,23 @@
 
 			// Create edge ID for pruning tracking
 			const edgeId = `${layer}_${srcToken}_${tgtToken}`;
-			const isPrunedManually = prunedEdges.has(edgeId);
 			
-			// Check if edge is pruned via pruningState$.edges (interactive pruning)
-			const displayLayer = `L${(() => {
-				if (typeof layer === "string") {
-					const m = layer.match(/layer\.(\d+)/);
-					if (m) return m[1];
-				}
-				return layer ?? '';
-			})()}_${layer?.includes('attention') ? 'ATTN' : 'FFN'}`;
-			const isPrunedInteractive = shouldEdgeBeRed(displayLayer, srcToken, tgtToken);
-			const isPruned = isPrunedManually || isPrunedInteractive;
+			// Don't show pruning in conditional mode - we want a clean view of conditional NIG values
+			let isPruned = false;
+			if (!conditionalModeState.isConditional) {
+				const isPrunedManually = prunedEdges.has(edgeId);
+				
+				// Check if edge is pruned via pruningState$.edges (interactive pruning)
+				const displayLayer = `L${(() => {
+					if (typeof layer === "string") {
+						const m = layer.match(/layer\.(\d+)/);
+						if (m) return m[1];
+					}
+					return layer ?? '';
+				})()}_${layer?.includes('attention') ? 'ATTN' : 'FFN'}`;
+				const isPrunedInteractive = shouldEdgeBeRed(displayLayer, srcToken, tgtToken);
+				isPruned = isPrunedManually || isPrunedInteractive;
+			}
 
 			// Only draw edge if proportion > 0
 			if (nigValue > 0) {
@@ -1000,6 +1121,23 @@
 				.attr('d', 'M0,0 L0,6 L6,3 z')
 				.attr('fill', '#22C55E');
 
+			// Define diagonal striped pattern for pruned nodes
+			const stripedPattern = defs.append('pattern')
+				.attr('id', 'pruned-stripes')
+				.attr('patternUnits', 'userSpaceOnUse')
+				.attr('width', 8)
+				.attr('height', 8)
+				.attr('patternTransform', 'rotate(45)');
+			stripedPattern.append('rect')
+				.attr('width', 4)
+				.attr('height', 8)
+				.attr('fill', 'rgba(220, 38, 38, 0.7)'); // red stripes
+			stripedPattern.append('rect')
+				.attr('x', 4)
+				.attr('width', 4)
+				.attr('height', 8)
+				.attr('fill', 'rgba(0, 0, 0, 0)'); // transparent gaps
+
 		// Add hollow bar for final edges to connect into
 		const barY = margin.top + topBarOffset;
 		const barStroke = 2;
@@ -1020,6 +1158,23 @@
 		.attr("ry", 6)
 		.attr("class", "top-bar")
 		.style("cursor", () => pruningCursorEnabled ? 'auto' : 'pointer')
+		.on("mousemove", function (event) {
+			if (hover$ && !pruningCursorEnabled) {
+				const [mx] = d3.pointer(event, this);
+				const localX = Math.max(0, Math.min(mx - barX, barWidth - 1));
+				const tokenIndex = Math.floor(localX / gridSize);
+				const tokenTypes = ['cls', 'qry', 'sep1', 'doc', 'sep2'];
+				const tokenType = tokenTypes[tokenIndex];
+				currentHover = { layer: 11, type: 'TOP', tokenType };
+				hover$.next(currentHover);
+			}
+		})
+		.on("mouseout", function () {
+			if (hover$) {
+				currentHover = null;
+				hover$.next(null);
+			}
+		})
 		.on("click", function (event) {
 				const [mx] = d3.pointer(event, this);
 				const localX = Math.max(0, Math.min(mx - barX, barWidth - 1));
@@ -1094,12 +1249,22 @@
 								.transition()
 								.duration(200)
 								.attr("r", gridSize / 3);
+							// Emit hover event
+							if (hover$ && !pruningCursorEnabled) {
+								currentHover = { layer: Math.floor(layer / 2), type: 'ATTN', tokenType };
+								hover$.next(currentHover);
+							}
 						})
 						.on("mouseout", function () {
 							d3.select(this)
 								.transition()
 								.duration(200)
 								.attr("r", gridSize / 4);
+							// Clear hover event
+							if (hover$) {
+								currentHover = null;
+								hover$.next(null);
+							}
 						})
 						.on("click", () => {
 							if (pruningCursorEnabled) {
@@ -1139,6 +1304,11 @@
 								.attr("height", gridSize / 1.5)
 							.attr("x", originalX - increase)
 							.attr("y", originalY - increase);
+							// Emit hover event
+							if (hover$ && !pruningCursorEnabled) {
+								currentHover = { layer: Math.floor(layer / 2), type: 'FFN', tokenType };
+								hover$.next(currentHover);
+							}
 					})
 					.on("mouseout", function () {
 						const rect = d3.select(this);
@@ -1150,6 +1320,11 @@
 							.attr("height", gridSize / 2)
 							.attr("x", originalX)
 							.attr("y", originalY);
+						// Clear hover event
+						if (hover$) {
+							currentHover = null;
+							hover$.next(null);
+						}
 					})
 					.on("click", () => {
 						if (pruningCursorEnabled) {
@@ -1161,6 +1336,9 @@
 			}
 		});
 	});
+
+	// Create group for pruning overlays (striped indicators above pruned nodes)
+	pruningOverlaysGroup = svg.append("g").attr("class", "pruning-overlays-group");
 
 	// Add token labels at the bottom
 	svg.selectAll(".token-label-bottom")
@@ -1209,15 +1387,25 @@
 	});
 </script>
 
-<div>
+<div class="architecture-container">
 	<div id="architecture-grid"></div>
 </div>
 
 
 <style>
+	/* Container for architecture grid */
+	.architecture-container {
+		display: flex;
+		flex-direction: row;
+		gap: 0;
+		width: 100%;
+		position: relative;
+	}
+
 	/* Architecture grid - fixed width to match SVG viewBox, no internal scrolling */
 	#architecture-grid {
 		width: 520px;
+		flex-shrink: 0;
 	}
 
 	:global(.token-label-bottom) {

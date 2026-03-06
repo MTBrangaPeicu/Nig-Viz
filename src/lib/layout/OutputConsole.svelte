@@ -357,7 +357,7 @@
     {#if forwardRelevance && forwardConfidence}
       <div class="tooltip tooltip-top" data-tip={forwardDetails}>
         <div class="text-xs cursor-help">
-          <span class="font-medium">{forwardRelevance}</span>
+          <span class="font-medium" class:text-green-600={forwardRelevance === 'Relevant'} class:text-red-600={forwardRelevance === 'Not Relevant'}>{forwardRelevance}</span>
           <span class="text-base-content/60 mx-1">·</span>
           <span class="text-base-content/80">{forwardConfidence}%</span>
         </div>
@@ -377,7 +377,7 @@
     {#if prunedRelevance && prunedConfidence}
       <div class="tooltip tooltip-top" data-tip={prunedDetails}>
         <div class="text-xs cursor-help">
-          <span class="font-medium">{prunedRelevance}</span>
+          <span class="font-medium" class:text-green-600={prunedRelevance === 'Relevant'} class:text-red-600={prunedRelevance === 'Not Relevant'}>{prunedRelevance}</span>
           <span class="text-base-content/60 mx-1">·</span>
           <span class="text-base-content/80">{prunedConfidence}%</span>
         </div>

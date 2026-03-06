@@ -16,6 +16,7 @@ export class Nigtable extends Component {
 		// Conditional NIG support
 		this.conditionalCursorEnabled$ = new BehaviorSubject(false); // Stream to enable/disable conditional NIG cursor mode
 		this.conditionalNigTarget$ = new BehaviorSubject(null); // Emits { layerIdx, neuronType, neuronIdx } on neuron click
+		this.conditionalModeState$ = new BehaviorSubject({ isConditional: false }); // Track if showing conditional NIG data
 	}
 
 	updatePruningState(pruningOptions) {
@@ -44,6 +45,7 @@ export class Nigtable extends Component {
 				pruningCursorEnabled$: this.pruningCursorEnabled$, // Pass pruning cursor state to view
 				conditionalCursorEnabled$: this.conditionalCursorEnabled$, // Pass conditional cursor state to view
 				conditionalNigTarget$: this.conditionalNigTarget$, // Pass conditional target stream to view
+				conditionalModeState$: this.conditionalModeState$, // Pass conditional mode state to view
 			},
 		});
 		return () => unmount(app);

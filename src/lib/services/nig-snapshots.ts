@@ -128,7 +128,7 @@ export class NIGSnapshotManager {
     const snapshot: NIGSnapshot = {
       version: 2,
       id: doc._id || `snapshot-${Date.now()}`,
-      timestamp: new Date().toLocaleTimeString(),
+      timestamp: new Date().toLocaleString(),
       query: inputs.query || '',
       passage: inputs.passage || '',
       baselineLabel: inputs.baselineLabel || '',
@@ -180,6 +180,19 @@ export class NIGSnapshotManager {
       console.log('[NIG SNAPSHOTS] ✓ Cleared all snapshots');
     } catch (e) {
       console.error('[NIG SNAPSHOTS] Failed to clear snapshots:', e);
+    }
+  }
+
+  // Delete a specific snapshot
+  async deleteSnapshot(snapshotId: string) {
+    try {
+      console.log('[NIG SNAPSHOTS] Deleting snapshot:', snapshotId);
+      await this.snapshotService.remove(snapshotId);
+      this.snapshots = this.snapshots.filter(s => s.id !== snapshotId);
+      this.notify();
+      console.log('[NIG SNAPSHOTS] ✓ Deleted snapshot');
+    } catch (e) {
+      console.error('[NIG SNAPSHOTS] Failed to delete snapshot:', e);
     }
   }
 

@@ -45,6 +45,59 @@
   let pruningTargets = $state<any[]>([]);
   let prunedEdges = $state<PrunedEdge[]>([]);
   
+  // All token types
+  const ALL_TOKEN_TYPES = ['cls', 'qry', 'sep1', 'doc', 'sep2'];
+  
+  // Computed display rules that collapse full layers into "all"
+  interface DisplayRule {
+    layer: string;
+    tokenType: string;
+    isFullLayer: boolean;
+    originalIndices: number[]; // indices in pruningRules for removal
+  }
+  
+  let displayRules = $derived.by(() => {
+    // Group rules by layer
+    const layerGroups: Map<string, { tokenTypes: Set<string>, indices: number[] }> = new Map();
+    
+    pruningRules.forEach((rule, idx) => {
+      if (!layerGroups.has(rule.layer)) {
+        layerGroups.set(rule.layer, { tokenTypes: new Set(), indices: [] });
+      }
+      const group = layerGroups.get(rule.layer)!;
+      group.tokenTypes.add(rule.tokenType);
+      group.indices.push(idx);
+    });
+    
+    const result: DisplayRule[] = [];
+    
+    layerGroups.forEach((group, layer) => {
+      const hasAllTokens = ALL_TOKEN_TYPES.every(tt => group.tokenTypes.has(tt));
+      
+      if (hasAllTokens) {
+        // Full layer - show as single "all" entry
+        result.push({
+          layer,
+          tokenType: 'all',
+          isFullLayer: true,
+          originalIndices: group.indices
+        });
+      } else {
+        // Individual token types
+        group.indices.forEach((idx) => {
+          result.push({
+            layer,
+            tokenType: pruningRules[idx].tokenType,
+            isFullLayer: false,
+            originalIndices: [idx]
+          });
+        });
+      }
+    });
+    
+    return result;
+  });
+  
   // Saved prunes state
   let savedPrunes = $state<PruneSnapshot[]>([]);
   let selectedPruneId = $state('');
@@ -101,6 +154,21 @@
   function removeRule(index: number) {
     if (pruningState$) {
       const newRules = pruningRules.filter((_, i) => i !== index);
+      pruningState$.next({
+        enabled: true,
+        rules: newRules,
+        targets: pruningTargets,
+        edges: prunedEdges,
+        thresholds: { attention: sliderToThreshold(attentionSliderValue), ffn: sliderToThreshold(ffnSliderValue) }
+      });
+    }
+  }
+  
+  // Function to remove a display rule (may remove multiple underlying rules for full layers)
+  function removeDisplayRule(displayRule: DisplayRule) {
+    if (pruningState$) {
+      const indicesToRemove = new Set(displayRule.originalIndices);
+      const newRules = pruningRules.filter((_, i) => !indicesToRemove.has(i));
       pruningState$.next({
         enabled: true,
         rules: newRules,
@@ -328,11 +396,20 @@
 >
   {#if visible}
     <div class="flex-1 overflow-y-auto p-4 space-y-4">
+      <!-- Section Header with Tooltip -->
+      <div class="section-header">
+        <span class="section-title">Pruning</span>
+        <span class="tooltip-wrapper">
+          <span class="tooltip-icon">?</span>
+          <span class="tooltip-text">Prune attention heads by clicking on architecture nodes or table cells. Adjust thresholds to filter by magnitude. Save pruning configurations as snapshots.</span>
+        </span>
+      </div>
+
       <!-- Icon at top -->
       <div class="flex items-center justify-center py-4">
         <button 
           class="btn btn-circle btn-lg"
-          class:btn-active={cursorActive}
+          class:btn-primary={cursorActive}
           onclick={() => {
             cursorActive = !cursorActive;
             console.log('[PruningPanel] Scissors clicked! cursorActive is now:', cursorActive);
@@ -354,27 +431,27 @@
 
       <!-- Pruned Nodes (Architecture clicks) -->
       <div class="space-y-2">
-        <div class="font-semibold text-sm">Pruned Nodes ({pruningRules.length})</div>
+        <div class="font-semibold text-sm">Pruned Nodes ({displayRules.length})</div>
 
-        {#if pruningRules.length === 0}
+        {#if displayRules.length === 0}
           <div class="text-xs text-base-content/50 py-2 text-center">
             Click architecture nodes to prune
           </div>
         {:else}
           <div class="space-y-1 max-h-32 overflow-y-auto">
-            {#each pruningRules as rule, i}
+            {#each displayRules as displayRule}
               <!-- svelte-ignore a11y_no_static_element_interactions -->
               <div 
                 class="text-xs bg-base-200 rounded px-2 py-1 flex justify-between items-center group hover:bg-amber-100 transition-colors cursor-pointer"
-                onmouseenter={() => showRulePreview(rule)}
+                onmouseenter={() => { if (displayRule.originalIndices.length > 0) showRulePreview(pruningRules[displayRule.originalIndices[0]]); }}
                 onmouseleave={() => clearPrunePreview()}
               >
                 <span class="font-mono">
-                  {rule.layer} → {rule.tokenType}
+                  {displayRule.layer} → {displayRule.tokenType}
                 </span>
                 <button 
                   class="btn btn-ghost btn-xs opacity-50 group-hover:opacity-100"
-                  onclick={() => removeRule(i)}
+                  onclick={() => removeDisplayRule(displayRule)}
                 >×</button>
               </div>
             {/each}
@@ -565,3 +642,69 @@
     </div>
   {/if}
 </div>
+
+<style>
+  .section-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 0.25rem;
+  }
+  
+  .section-title {
+    font-weight: 600;
+    font-size: 0.875rem;
+    color: hsl(var(--bc) / 0.8);
+  }
+  
+  .tooltip-wrapper {
+    position: relative;
+    display: inline-flex;
+  }
+  
+  .tooltip-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.25rem;
+    height: 1.25rem;
+    font-size: 0.75rem;
+    font-weight: 700;
+    border-radius: 50%;
+    background-color: hsl(var(--b3));
+    color: hsl(var(--bc) / 0.7);
+    cursor: help;
+    border: 2px solid hsl(var(--bc) / 0.3);
+  }
+  
+  .tooltip-wrapper:hover .tooltip-icon {
+    background-color: hsl(var(--p));
+    color: hsl(var(--pc));
+    border-color: hsl(var(--p));
+  }
+  
+  .tooltip-text {
+    visibility: hidden;
+    opacity: 0;
+    position: absolute;
+    right: 0;
+    top: 100%;
+    margin-top: 0.5rem;
+    padding: 0.625rem 0.75rem;
+    background-color: #1a1a1a;
+    color: #ffffff;
+    font-size: 0.75rem;
+    font-weight: 400;
+    border-radius: 0.375rem;
+    width: 220px;
+    z-index: 1000;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+    line-height: 1.5;
+    transition: opacity 0.15s ease, visibility 0.15s ease;
+  }
+  
+  .tooltip-wrapper:hover .tooltip-text {
+    visibility: visible;
+    opacity: 1;
+  }
+</style>

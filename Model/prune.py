@@ -441,10 +441,7 @@ def get_token_indices(token_type, sep_position, seq_len):
     # Token mapping: ['cls', 'qry', 'sep1', 'doc', 'sep2']
     # cls=0, qry=1 to sep_position-1, sep1=sep_position, doc=sep_position+1 to seq_len-2, sep2=seq_len-1
     
-    if token_type == 'all':
-        # Return all token indices for the whole sequence
-        return list(range(seq_len))
-    elif token_type == 'cls':
+    if token_type == 'cls':
         return [0]
     elif token_type == 'qry':
         # Query tokens: from position 1 to sep_position-1

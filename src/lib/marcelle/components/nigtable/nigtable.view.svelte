@@ -10,12 +10,15 @@
 	export let pruningCursorEnabled$;
 	export let conditionalCursorEnabled$ = null;
 	export let conditionalNigTarget$ = null;
+	export let conditionalModeState$ = null;
 	let options = {};
 	let pruningState = { enabled: false, rules: [], targets: [], thresholds: {} };
 	let useAbsoluteValues = true;
 	let globalCutoff = 0;
 	let pruningCursorEnabled = false;
 	let conditionalCursorEnabled = false;
+	let isInConditionalMode = false;
+	let heatmapMetric = 'nig'; // 'nig' | 'activation' - declared early for conditional mode subscription
 
 	// Sorting state
 	let ffnSort = { key: 'val', dir: 'desc' }; // keys: 'val' | 'index'
@@ -70,8 +73,22 @@
 		});
 	}
 
+	// Subscribe to conditional mode state (when showing conditional NIG data)
+	if (conditionalModeState$) {
+		conditionalModeState$.subscribe(state => {
+			isInConditionalMode = state?.isConditional ?? false;
+			// Force NIG metric when in conditional mode (no activation data available)
+			if (isInConditionalMode) {
+				heatmapMetric = 'nig';
+			}
+			console.log('[NIG Table] Conditional mode:', isInConditionalMode ? 'Active' : 'Inactive');
+		});
+	}
+
 	// Handle conditional NIG target selection from table clicks
-	function handleConditionalNigTarget(neuronIdx, neuronType) {
+	// For ATTN: depends on orientation - columns can be sources or targets
+	// For FFN: only uses single tokenType (from the view's options.tokenType)
+	function handleConditionalNigTarget(neuronIdx, neuronType, columnTokenType = null) {
 		if (!conditionalCursorEnabled || !conditionalNigTarget$) return;
 		
 		// Get layer info from options
@@ -79,12 +96,38 @@
 		if (!layerMatch) return;
 		const layerNum = parseInt(layerMatch[1]);
 		
-		console.log(`[NIG Table] Conditional NIG target selected: layer=${layerNum}, type=${neuronType}, neuron=${neuronIdx}`);
+		// Get the view's token type (from architecture row that created this table)
+		const viewTokenType = options.tokenType || null;
+		
+		// For ATTN: determine source/target based on orientation
+		// orientation === 'srcToTgts': viewTokenType is SOURCE, column is TARGET
+		// orientation === 'tgtsToSrcs': viewTokenType is TARGET, column is SOURCE
+		let sourceTokenType = viewTokenType;
+		let targetTokenType = columnTokenType;
+		
+		if (neuronType === 'ATTN' && columnTokenType) {
+			// Clean up column label (remove arrows like "→ cls" or "cls →")
+			const cleanColumn = columnTokenType.replace(/[→]/g, '').trim();
+			
+			if (options.orientation === 'tgtsToSrcs') {
+				// Inverted: viewTokenType is the TARGET, column is the SOURCE
+				sourceTokenType = cleanColumn;
+				targetTokenType = viewTokenType;
+			} else {
+				// Normal (srcToTgts): viewTokenType is the SOURCE, column is the TARGET
+				sourceTokenType = viewTokenType;
+				targetTokenType = cleanColumn;
+			}
+		}
+		
+		console.log(`[NIG Table] Conditional NIG target selected: layer=${layerNum}, type=${neuronType}, neuron=${neuronIdx}, source=${sourceTokenType}, target=${targetTokenType}, orientation=${options.orientation}`);
 		
 		conditionalNigTarget$.next({
 			layerIdx: layerNum,
 			neuronType: neuronType === 'ATTN' ? 'attention' : 'ffn',
-			neuronIdx: neuronIdx
+			neuronIdx: neuronIdx,
+			sourceTokenType: sourceTokenType,
+			targetTokenType: neuronType === 'ATTN' ? targetTokenType : null // Only ATTN uses both source and target
 		});
 	}
 
@@ -423,7 +466,7 @@
 
 	// Heatmap toggles
 	let displayMode = 'heatmap'; // 'values' | 'heatmap'
-	let heatmapMetric = 'nig'; // 'nig' | 'activation'
+	// heatmapMetric declared at top of script for conditional mode subscription
 	let showValuesOnHeatmap = false; // show values on heatmap squares
 	let attnHeatmapEl;
 	let ffnHeatmapEl;
@@ -653,7 +696,8 @@
 				if (headMatch) {
 					const headIndex = parseInt(headMatch[1]);
 					if (conditionalCursorEnabled) {
-						handleConditionalNigTarget(headIndex, 'ATTN');
+						// Pass the column (d.col) as the target token type
+						handleConditionalNigTarget(headIndex, 'ATTN', d.col);
 					} else if (pruningCursorEnabled) {
 						togglePruningTarget(headIndex, 'ATTN');
 					}
@@ -1403,21 +1447,24 @@
 </script>
 
 
-<div style="width: 100%;">
-	<div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 0.25rem; gap: 1rem;">
-		<!-- Mode toggles on the left (always visible) -->
+<div class="nigtable-wrapper">
+	<!-- Fixed controls header -->
+	<div class="nigtable-controls">
+		<!-- Mode toggles on the left (only visible when data is available) -->
 		<div class="mode-toggle" style="flex-shrink: 0; display: flex; flex-direction: column; gap: 0.5rem;">
-			{#if options.type === 'ATTN'}
+			{#if options.type === 'ATTN' && Array.isArray(options.values) && !isInConditionalMode}
 			<div class="metric-toggle">
 				<label><input type="radio" name="metric-{options.type || 'default'}" value="nig" bind:group={heatmapMetric}> NIG</label>
 				<label><input type="radio" name="metric-{options.type || 'default'}" value="activation" bind:group={heatmapMetric}> Activation</label>
 			</div>
 			{/if}
+			{#if Array.isArray(options.values)}
 			<button 
 				class="btn btn-sm subset-btn"
 				class:active={showValuesOnHeatmap}
 				on:click={() => showValuesOnHeatmap = !showValuesOnHeatmap}
 			>Show Values</button>
+			{/if}
 		</div>
 		
 		<!-- Color Scale Legend - always visible -->
@@ -1457,6 +1504,8 @@
 		</div>
 	</div>
 
+	<!-- Scrollable content area -->
+	<div class="nigtable-content">
 	{#if options.type === 'ATTN_LAYER_HEATMAP'}
 		<div class="attn-heatmap-container">
 			<div class="attn-heatmap" bind:this={attnHeatmapEl}></div>
@@ -1548,11 +1597,9 @@
 					<tr
 						class:pruning-cursor={pruningCursorEnabled}
 						class:conditional-cursor={conditionalCursorEnabled}
-						on:click={() => {
-							if (conditionalCursorEnabled) {
-								handleConditionalNigTarget(head.index, 'ATTN');
-							} else {
-								// Use current tokenType for this view (source/target based on orientation)
+						on:click={(e) => {
+							// Only handle row clicks for pruning mode - conditional mode handled per-cell
+							if (pruningCursorEnabled) {
 								togglePruningTarget(head.index, 'ATTN');
 							}
 						}}
@@ -1560,7 +1607,18 @@
 						<td><div class="circle" style="background-color: {shouldCircleBeRed(head.index, 'ATTN') ? 'darkred' : d3.scaleSequential(d3.interpolateGreys).domain([minHeadScore, minHeadScore === maxHeadScore ? maxHeadScore + 1 : maxHeadScore]).clamp(true)(head.score)}"></div></td>
 						<td>head#{head.index}</td>
 						{#each head.row as val, colIdx}
-						<td class:highlight-edge={isValueUsedInEdges(head.nigRow[colIdx])}>{formatValue(val)}</td>
+						<td 
+							class:highlight-edge={isValueUsedInEdges(head.nigRow[colIdx])}
+							on:click={(e) => {
+								if (conditionalCursorEnabled) {
+									e.stopPropagation();
+									// Pass the column token type - handleConditionalNigTarget will figure out source vs target based on orientation
+									const colToken = TOKEN_TYPES[colIdx];
+									handleConditionalNigTarget(head.index, 'ATTN', colToken);
+								}
+							}}
+							style="cursor: {conditionalCursorEnabled ? 'pointer' : 'default'}"
+						>{formatValue(val)}</td>
 						{/each}
 					</tr>
 					{/each}
@@ -1586,9 +1644,34 @@
 			<pre>{JSON.stringify(options.values, null, 2)}</pre>
 		{/if}
 	{/if}
+	</div>
 </div>
 
 <style>
+	.nigtable-wrapper {
+		width: 100%;
+		height: 100%;
+		display: flex;
+		flex-direction: column;
+	}
+	
+	.nigtable-controls {
+		flex-shrink: 0;
+		display: flex;
+		justify-content: space-between;
+		align-items: flex-start;
+		margin-bottom: 0.25rem;
+		gap: 1rem;
+		padding: 0.5rem;
+		border-bottom: 1px solid hsl(var(--b3, 0 0% 90%));
+		background: hsl(var(--b1, 0 0% 100%));
+	}
+	
+	.nigtable-content {
+		flex: 1;
+		min-height: 0;
+		overflow: auto;
+	}
 	/* removed .my-color header style (title now comes from widget title) */
 	.nig-table {
 		width: 100%;
@@ -1638,9 +1721,7 @@
 	}
 	.ffn-table-container {
 		width: 100%;
-		margin-top: 1rem;
-		border: 1px solid #ddd;
-		border-radius: 4px;
+		margin-top: 0.5rem;
 	}
 	.ffn-table-container table {
 		width: 100%;
@@ -1657,9 +1738,7 @@
 	/* ATTN table sizing */
 	.attn-table-container {
 		width: 100%;
-		margin-top: 1rem;
-		border: 1px solid #ddd;
-		border-radius: 4px;
+		margin-top: 0.5rem;
 	}
 	.attn-table-container thead {
 		position: sticky;
@@ -1672,9 +1751,7 @@
 	/* ATTN heatmap sizing */
 	.attn-heatmap-container {
 		width: 100%;
-		border: 1px solid #ddd;
-		border-radius: 4px;
-		margin-top: 0.5rem;
+		margin-top: 0.25rem;
 		position: relative;
 	}
 	.attn-heatmap {
@@ -1685,9 +1762,7 @@
 	/* FFN heatmap sizing */
 	.ffn-heatmap-container {
 		width: 100%;
-		border: 1px solid #ddd;
-		border-radius: 4px;
-		margin-top: 0.5rem;
+		margin-top: 0.25rem;
 		position: relative;
 	}
 	.ffn-heatmap {
@@ -1792,9 +1867,6 @@
 	}
 
 	/* Conditional NIG cursor styling */
-	tr.conditional-cursor {
-		cursor: crosshair;
-	}
 	tr.conditional-cursor:hover {
 		background-color: #dbeafe !important; /* blue-100 */
 		border-color: #3b82f6 !important; /* blue-500 */

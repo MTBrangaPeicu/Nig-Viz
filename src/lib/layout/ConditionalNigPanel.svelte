@@ -165,16 +165,60 @@
     subscriptions.forEach(sub => sub?.unsubscribe?.());
   });
   
+  // Map architecture/table tokenType to panel input part format
+  function mapTokenTypeToInputPart(tokenType: string | null): 'cls' | 'query' | 'sep_1' | 'document' | 'sep_2' | null {
+    if (!tokenType) return null;
+    const mapping: Record<string, 'cls' | 'query' | 'sep_1' | 'document' | 'sep_2'> = {
+      'cls': 'cls',
+      'qry': 'query',
+      'query': 'query',
+      'sep1': 'sep_1',
+      'sep_1': 'sep_1',
+      'doc': 'document',
+      'document': 'document',
+      'sep2': 'sep_2',
+      'sep_2': 'sep_2'
+    };
+    return mapping[tokenType] ?? null;
+  }
+
   // Set target from external click (architecture or table)
-  export function setTarget(layerIdx: number, neuronIdx: number, neuronType: 'attention' | 'ffn') {
+  // For architecture: tokenType is passed as a single value (used for both source and target)
+  // For table: sourceTokenType and targetTokenType can be passed separately
+  export function setTarget(
+    layerIdx: number, 
+    neuronIdx: number, 
+    neuronType: 'attention' | 'ffn', 
+    sourceTokenType?: string | null,
+    targetTokenType?: string | null
+  ) {
     selectedLayerIdx = layerIdx;
     selectedNeuronIdx = neuronIdx;
     selectedNeuronType = neuronType;
+    
+    // Map and set source token type
+    const mappedSource = mapTokenTypeToInputPart(sourceTokenType ?? null);
+    if (mappedSource) {
+      selectedSourceInputPart = mappedSource;
+    }
+    
+    // Map and set target token type
+    const mappedTarget = mapTokenTypeToInputPart(targetTokenType ?? null);
+    if (mappedTarget) {
+      selectedTargetInputPart = mappedTarget;
+    } else if (mappedSource && neuronType === 'attention' && !targetTokenType) {
+      // If only source is provided for attention, also use it for target (legacy behavior)
+      selectedTargetInputPart = mappedSource;
+    } else if (mappedSource && neuronType === 'ffn' && !targetTokenType) {
+      // For FFN with only source, use source as target (FFN doesn't have src/tgt distinction)
+      selectedTargetInputPart = mappedSource;
+    }
+    
     computedResult = null;
     errorMessage = null;
     // Persist to service for panel switch persistence
     saveTargetToService();
-    console.log('[CONDITIONAL NIG] Target set:', { layerIdx, neuronIdx, neuronType });
+    console.log('[CONDITIONAL NIG] Target set:', { layerIdx, neuronIdx, neuronType, sourceTokenType, targetTokenType, mappedSource, mappedTarget });
   }
   
   // Compute conditional NIG
@@ -231,7 +275,14 @@
     nigConnection.exitConditionalMode();
     isInConditionalMode = false;
     computedResult = null;
-    // Keep target selection in case user wants to try another computation
+    
+    // Clear target selection so user knows to pick a new target
+    selectedLayerIdx = null;
+    selectedNeuronIdx = null;
+    selectedNeuronType = null;
+    selectedSourceInputPart = null;
+    selectedTargetInputPart = null;
+    nigConnection.conditionalTarget = null;
   }
   
   // Clear selection and exit conditional mode
@@ -262,6 +313,19 @@
     const typeLabel = selectedNeuronType === 'attention' ? 'Attention Head' : 'FFN Neuron';
     return `Layer ${selectedLayerIdx}, ${typeLabel} ${selectedNeuronIdx}`;
   });
+  
+  // Format input part for display
+  function formatInputPartDisplay(part: string | null): string {
+    if (part === null) return 'all';
+    const map: Record<string, string> = {
+      cls: 'cls',
+      query: 'qry',
+      sep_1: 'sep1',
+      document: 'doc',
+      sep_2: 'sep2'
+    };
+    return map[part] ?? part;
+  }
 </script>
 
 <div 
@@ -269,6 +333,15 @@
 >
   {#if visible}
     <div class="flex-1 overflow-y-auto p-4 space-y-4">
+      <!-- Section Header with Tooltip -->
+      <div class="section-header">
+        <span class="section-title">Conditional NIG</span>
+        <span class="tooltip-wrapper">
+          <span class="tooltip-icon">?</span>
+          <span class="tooltip-text">Compute conditional NIG by selecting a target neuron. This shows how earlier neurons contribute to the selected target's activation.</span>
+        </span>
+      </div>
+
       <!-- Conditional Mode Banner -->
       {#if isInConditionalMode}
         <div class="alert alert-info text-xs py-2">
@@ -280,11 +353,10 @@
       {/if}
 
       <!-- Cursor Toggle Button -->
-      <div class="flex items-center justify-center py-2">
+      <div class="flex items-center justify-center py-4">
         <button 
           class="btn btn-circle btn-lg"
           class:btn-primary={cursorActive}
-          class:btn-ghost={!cursorActive}
           onclick={() => cursorActive = !cursorActive}
           aria-label="Toggle Conditional NIG cursor"
           disabled={isInConditionalMode}
@@ -317,15 +389,19 @@
         {#if hasValidTarget}
           <div class={`rounded-lg p-3 space-y-1 ${isInConditionalMode ? 'bg-info/10' : 'bg-primary/10'}`}>
             <div class="text-sm font-medium">{targetDescription()}</div>
-            <div class="flex flex-wrap gap-1 text-xs text-base-content/70">
-              <span class="badge badge-sm badge-outline">Layer {selectedLayerIdx}</span>
-              <span class="badge badge-sm badge-outline">{selectedNeuronType === 'attention' ? 'ATTN' : 'FFN'}</span>
-              <span class="badge badge-sm badge-outline">#{selectedNeuronIdx}</span>
-            </div>
             {#if isInConditionalMode}
-              <div class="text-xs text-info mt-1">
+              <div class="text-xs text-base-content/70 mt-1">
                 Showing attributions for layers 0-{selectedLayerIdx}
               </div>
+              {#if selectedNeuronType === 'attention'}
+                <div class="text-xs text-info mt-1">
+                  Analyzing: {formatInputPartDisplay(selectedSourceInputPart)} → {formatInputPartDisplay(selectedTargetInputPart)}
+                </div>
+              {:else}
+                <div class="text-xs text-info mt-1">
+                  Analyzing: {formatInputPartDisplay(selectedTargetInputPart)}
+                </div>
+              {/if}
             {/if}
           </div>
         {:else}
@@ -351,11 +427,11 @@
                 bind:value={selectedSourceInputPart}
               >
                 <option value={null}>All Tokens</option>
-                <option value="cls">[CLS]</option>
-                <option value="query">Query</option>
-                <option value="sep_1">[SEP] (first)</option>
-                <option value="document">Document</option>
-                <option value="sep_2">[SEP] (last)</option>
+                <option value="cls">cls</option>
+                <option value="query">qry</option>
+                <option value="sep_1">sep1</option>
+                <option value="document">doc</option>
+                <option value="sep_2">sep2</option>
               </select>
             </div>
           {/if}
@@ -377,11 +453,11 @@
               bind:value={selectedTargetInputPart}
             >
               <option value={null}>All Tokens</option>
-              <option value="cls">[CLS]</option>
-              <option value="query">Query</option>
-              <option value="sep_1">[SEP] (first)</option>
-              <option value="document">Document</option>
-              <option value="sep_2">[SEP] (last)</option>
+              <option value="cls">cls</option>
+              <option value="query">qry</option>
+              <option value="sep_1">sep1</option>
+              <option value="document">doc</option>
+              <option value="sep_2">sep2</option>
             </select>
           </div>
 
@@ -453,3 +529,69 @@
     </div>
   {/if}
 </div>
+
+<style>
+  .section-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 0.25rem;
+  }
+  
+  .section-title {
+    font-weight: 600;
+    font-size: 0.875rem;
+    color: hsl(var(--bc) / 0.8);
+  }
+  
+  .tooltip-wrapper {
+    position: relative;
+    display: inline-flex;
+  }
+  
+  .tooltip-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.25rem;
+    height: 1.25rem;
+    font-size: 0.75rem;
+    font-weight: 700;
+    border-radius: 50%;
+    background-color: hsl(var(--b3));
+    color: hsl(var(--bc) / 0.7);
+    cursor: help;
+    border: 2px solid hsl(var(--bc) / 0.3);
+  }
+  
+  .tooltip-wrapper:hover .tooltip-icon {
+    background-color: hsl(var(--p));
+    color: hsl(var(--pc));
+    border-color: hsl(var(--p));
+  }
+  
+  .tooltip-text {
+    visibility: hidden;
+    opacity: 0;
+    position: absolute;
+    right: 0;
+    top: 100%;
+    margin-top: 0.5rem;
+    padding: 0.625rem 0.75rem;
+    background-color: #1a1a1a;
+    color: #ffffff;
+    font-size: 0.75rem;
+    font-weight: 400;
+    border-radius: 0.375rem;
+    width: 220px;
+    z-index: 1000;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+    line-height: 1.5;
+    transition: opacity 0.15s ease, visibility 0.15s ease;
+  }
+  
+  .tooltip-wrapper:hover .tooltip-text {
+    visibility: visible;
+    opacity: 1;
+  }
+</style>

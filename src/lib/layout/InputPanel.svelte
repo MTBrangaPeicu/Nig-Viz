@@ -164,12 +164,18 @@
     const passage = passageInput.$value.getValue();
     if (!passage) return;
     
+    const query = queryInput.$value.getValue();
+
     connection.submitNIG({
-      query: queryInput.$value.getValue(),
+      query,
       passage,
       numReps: numRepsInput.$value.getValue(),
       baselineLabel: baseline
     });
+        
+    // Also trigger the forward pass
+    const fullPassage = passage + (passageInput2?.$value?.getValue?.() ? (' \n\n' + passageInput2.$value.getValue()) : '');
+    connection.submitForwardPass(query, fullPassage);
   }
 
   function handleCalculateTokenIG() {
@@ -195,7 +201,7 @@
         <span class="section-title">Inputs</span>
         <span class="tooltip-wrapper">
           <span class="tooltip-icon">?</span>
-          <span class="tooltip-text">Select a query, filter by relevance level, then choose a passage for NIG analysis.</span>
+          <span class="tooltip-text">Select a query, filter by relevance level -qrel, then choose a passage for NIG analysis.</span>
         </span>
       </div>
 
@@ -226,7 +232,7 @@
         <span class="section-title">NIG Parameters</span>
         <span class="tooltip-wrapper">
           <span class="tooltip-icon">?</span>
-          <span class="tooltip-text">Set the number of integration steps and baseline type for computing attributions.</span>
+          <span class="tooltip-text">Set the number of repetitions in IG computation and baseline type for computing attributions.</span>
         </span>
       </div>
 
